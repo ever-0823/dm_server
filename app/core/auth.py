@@ -37,6 +37,17 @@ class TokenStore:
         """让token失效"""
         cls._tokens.pop(token, None)
 
+    @classmethod
+    def update_user(cls, token: str, user: dict):
+        # ponytail: 现有登录态存在内存里，改资料后顺手同步这一份就够了。
+        if token not in cls._tokens:
+            return
+        cls._tokens[token] = {
+            "id": user["id"],
+            "username": user["username"],
+            "role": user["role"],
+        }
+
 # 用于从 HTTP 请求的 Authorization 头中提取 Bearer Token
 def extract_bearer_token(authorization: Optional[str]) -> str:
     """

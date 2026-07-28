@@ -22,5 +22,11 @@ class Settings:
     #UPLOAD_FOLDER 就是“文件最终保存到哪里
     UPLOAD_FOLDER = os.path.join(BASE_DIR, "uploads")
 
+    # PaddleOCR 模型保存在后端目录中，部署时可通过环境变量修改路径。
+    OCR_MODEL_CACHE_DIR = os.getenv(
+        "OCR_MODEL_CACHE_DIR",
+        os.path.join(BASE_DIR, ".ocr_models"),
+    )
+
 # 创建一个 Settings 实例，方便在项目其他地方导入使用
 settings = Settings()

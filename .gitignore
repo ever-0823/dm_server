@@ -1,0 +1,7 @@
+# 后端虚拟环境与 OCR 模型文件体积较大，只保留依赖清单。
+.venv/
+.ocr_models/
+
+# Python 运行时缓存可由解释器自动重新生成。
+__pycache__/
+*.py[cod]

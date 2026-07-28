@@ -92,8 +92,8 @@ def export_devices(user=Depends(current_user)):
     output = io.StringIO()
     write = csv.writer(output)
 
-    # 表头需要单独写成一行，不能把字符串列表当成多行数据传入。
-    write.writerow(["device_id", "device_name", "model", "manufacturer", "location", "status"])
+    # 导出表头和设备列表页保持一致，避免界面列名和 CSV 列名不统一。
+    write.writerow(["设备编号", "设备名称", "型号", "厂商", "位置", "状态"])
     for device in devices:
         write.writerow([
             device["device_id"],
@@ -110,9 +110,11 @@ def export_devices(user=Depends(current_user)):
         user["username"],
         "导出设备列表 CSV",
     )
+    # Excel 直接打开 CSV 时通常会依赖 BOM 识别 UTF-8，这里补上以避免中文乱码。
+    csv_bytes = output.getvalue().encode("utf-8-sig")
     return StreamingResponse(
-        iter([output.getvalue()]),
-        media_type="text/csv",
+        iter([csv_bytes]),
+        media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": "attachment; filename=devices.csv"},
     )
 
@@ -122,18 +124,33 @@ def export_devices(user=Depends(current_user)):
 
 @router.post("/devices/import")
 def import_devices(file: UploadFile = File(...), user=Depends(current_user)):
-    # 上传导入时统一按 UTF-8 读取 CSV 内容。
-    content = file.file.read().decode("utf-8")
+    # utf-8-sig 同时兼容普通 UTF-8 和带 BOM 的 UTF-8，便于导出文件再直接导回。
+    content = file.file.read().decode("utf-8-sig")
     # csv.DictReader(...)：按“表头 -> 值”的方式逐行读取。
     reader = csv.DictReader(io.StringIO(content))
 
     success_count = 0
     skipped_count = 0
 
+    # 导入同时兼容旧英文表头和新中文表头，避免导出格式调整后影响回传导入。
+    column_aliases = {
+        "device_id": ["device_id", "设备编号"],
+        "device_name": ["device_name", "设备名称"],
+        "model": ["model", "型号"],
+        "manufacturer": ["manufacturer", "厂商"],
+        "location": ["location", "位置"],
+        "status": ["status", "状态"],
+    }
+
     # .strip() 是 Python 字符串的内置方法，用于移除字符串首尾的空白字符。
     for row in reader:
-        device_id = row.get("device_id", "").strip()
-        device_name = row.get("device_name", "").strip()
+        # 按别名顺序取值，先命中的列名直接使用。
+        normalized_row = {
+            field: next((str(row.get(alias, "")).strip() for alias in aliases if str(row.get(alias, "")).strip()), "")
+            for field, aliases in column_aliases.items()
+        }
+        device_id = normalized_row["device_id"]
+        device_name = normalized_row["device_name"]
 
         if not device_id or not device_name:
             skipped_count += 1
@@ -148,10 +165,10 @@ def import_devices(file: UploadFile = File(...), user=Depends(current_user)):
             {
                 "device_id": device_id,
                 "device_name": device_name,
-                "model": row.get("model", "").strip(),
-                "manufacturer": row.get("manufacturer", "").strip(),
-                "location": row.get("location", "").strip(),
-                "status": row.get("status", "").strip() or "active",
+                "model": normalized_row["model"],
+                "manufacturer": normalized_row["manufacturer"],
+                "location": normalized_row["location"],
+                "status": normalized_row["status"] or "active",
             }
         )
         success_count += 1

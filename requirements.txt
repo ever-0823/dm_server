@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+python-multipart
+python-dotenv
+pymysql
+bcrypt
+paddlepaddle
+paddleocr
+# 用于运行后端接口测试。
+pytest

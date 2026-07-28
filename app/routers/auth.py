@@ -5,7 +5,7 @@ from ..model.login import verify_password
 from ..model.user import User
 from fastapi import APIRouter, Depends,Header
 from ..core.security import hash_password
-from ..schems.auth import RegisterRequest
+from ..schems.auth import PasswordChangeRequest, ProfileUpdateRequest, RegisterRequest
 from ..dependencies.auth import current_user
 from ..core.exceptions import AppException
 
@@ -76,6 +76,46 @@ def me(user=Depends(current_user)):
     只有带着合法 token 才能访问。
     """
     return success_response(data=user)
+
+
+@router.put("/auth/profile")
+def update_profile(
+    payload: ProfileUpdateRequest,
+    authorization: str | None = Header(None),
+    user=Depends(current_user),
+):
+    # 编辑资料当前只支持用户名，先把能力做实，不为未来字段先扩模型。
+    existing = User.find_by_username(payload.username)
+    if existing and existing["id"] != user["id"]:
+        raise AppException(400, "用户名已存在")
+
+    User.update_username(user["id"], payload.username)
+    refreshed_user = User.find_by_id(user["id"])
+    if not refreshed_user:
+        raise AppException(404, "用户不存在")
+
+    token = extract_bearer_token(authorization)
+    TokenStore.update_user(token, refreshed_user)
+    return success_response(
+        message="资料更新成功",
+        data={
+            "id": refreshed_user["id"],
+            "username": refreshed_user["username"],
+            "role": refreshed_user["role"],
+        },
+    )
+
+
+@router.post("/auth/change-password")
+def change_password(payload: PasswordChangeRequest, user=Depends(current_user)):
+    db_user = User.find_by_id(user["id"])
+    if not db_user:
+        raise AppException(404, "用户不存在")
+    if not verify_password(payload.current_password, db_user["password_hash"]):
+        raise AppException(400, "当前密码错误")
+
+    User.update_password(user["id"], hash_password(payload.new_password))
+    return success_response(message="密码修改成功")
 
 """
 Header(default=None)：从请求头里拿 Authorization
