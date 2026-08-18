@@ -122,10 +122,21 @@ def export_devices(user=Depends(current_user)):
 """CSV导入接口"""
 
 
+def decode_csv_content(content: bytes) -> str:
+    """兼容系统导出的 UTF-8 CSV 和 Windows Excel 常见的 GB18030 CSV。"""
+    try:
+        return content.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        try:
+            return content.decode("gb18030")
+        except UnicodeDecodeError as exc:
+            raise AppException(400, "CSV 编码无法识别，请使用 UTF-8 或 GB18030 格式") from exc
+
+
 @router.post("/devices/import")
 def import_devices(file: UploadFile = File(...), user=Depends(current_user)):
-    # utf-8-sig 同时兼容普通 UTF-8 和带 BOM 的 UTF-8，便于导出文件再直接导回。
-    content = file.file.read().decode("utf-8-sig")
+    # 优先读取系统导出的 UTF-8，同时兼容 Windows Excel 保存的中文 CSV。
+    content = decode_csv_content(file.file.read())
     # csv.DictReader(...)：按“表头 -> 值”的方式逐行读取。
     reader = csv.DictReader(io.StringIO(content))
 
