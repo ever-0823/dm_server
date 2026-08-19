@@ -1,0 +1,23 @@
+services:
+  pgvector:
+    # 官方 pgvector 镜像已预装 vector 扩展，避免手动修改 PostgreSQL。
+    image: pgvector/pgvector:pg16
+    container_name: practice-pgvector
+    environment:
+      POSTGRES_DB: knowledge_db
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: "1234"
+    ports:
+      - "5432:5432"
+    volumes:
+      # 命名卷确保容器重建后知识向量仍然保留。
+      - pgvector_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d knowledge_db"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+volumes:
+  pgvector_data:

@@ -8,3 +8,11 @@ paddlepaddle
 paddleocr
 # 用于运行后端接口测试。
 pytest
+# Qwen3 Embedding 本地推理及 PDF 文本提取。
+torch>=2.6,<3
+sentence-transformers>=5,<6
+modelscope>=1.28,<2
+pypdf>=5,<7
+# PostgreSQL 连接和 pgvector 类型适配。
+psycopg[binary]>=3.2,<4
+pgvector>=0.4,<1

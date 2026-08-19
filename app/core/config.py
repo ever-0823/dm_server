@@ -28,5 +28,26 @@ class Settings:
         os.path.join(BASE_DIR, ".ocr_models"),
     )
 
+    # 知识库使用独立 PostgreSQL，避免影响现有 MySQL 业务数据。
+    VECTOR_DB_HOST = os.getenv("VECTOR_DB_HOST", "127.0.0.1")
+    VECTOR_DB_PORT = int(os.getenv("VECTOR_DB_PORT", "5432"))
+    VECTOR_DB_NAME = os.getenv("VECTOR_DB_NAME", "knowledge_db")
+    VECTOR_DB_USER = os.getenv("VECTOR_DB_USER", "postgres")
+    VECTOR_DB_PASSWORD = os.getenv("VECTOR_DB_PASSWORD", "1234")
+
+    # Qwen3-Embedding-0.6B 默认输出 1024 维向量，字段维度必须与模型一致。
+    EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "Qwen/Qwen3-Embedding-0.6B")
+    EMBEDDING_MODEL_SOURCE = os.getenv("EMBEDDING_MODEL_SOURCE", "modelscope")
+    EMBEDDING_DEVICE = os.getenv("EMBEDDING_DEVICE", "cpu")
+    EMBEDDING_DIMENSIONS = int(os.getenv("EMBEDDING_DIMENSIONS", "1024"))
+    EMBEDDING_MODEL_CACHE_DIR = os.getenv(
+        "EMBEDDING_MODEL_CACHE_DIR",
+        os.path.join(BASE_DIR, ".embedding_models"),
+    )
+
+    # 文本块保留少量重叠，避免答案恰好落在两个块的边界上。
+    KNOWLEDGE_CHUNK_SIZE = int(os.getenv("KNOWLEDGE_CHUNK_SIZE", "600"))
+    KNOWLEDGE_CHUNK_OVERLAP = int(os.getenv("KNOWLEDGE_CHUNK_OVERLAP", "80"))
+
 # 创建一个 Settings 实例，方便在项目其他地方导入使用
 settings = Settings()
