@@ -49,5 +49,10 @@ class Settings:
     KNOWLEDGE_CHUNK_SIZE = int(os.getenv("KNOWLEDGE_CHUNK_SIZE", "600"))
     KNOWLEDGE_CHUNK_OVERLAP = int(os.getenv("KNOWLEDGE_CHUNK_OVERLAP", "80"))
 
+    # Ollama 负责根据向量检索结果生成最终答案。
+    OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
+    OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3:0.6b")
+    OLLAMA_TIMEOUT = int(os.getenv("OLLAMA_TIMEOUT", "180"))
+
 # 创建一个 Settings 实例，方便在项目其他地方导入使用
 settings = Settings()

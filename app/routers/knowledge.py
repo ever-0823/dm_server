@@ -7,7 +7,7 @@ from starlette.concurrency import run_in_threadpool
 from app.core.exceptions import AppException
 from app.core.responses import success_response
 from app.dependencies.auth import current_user
-from app.knowledge.service import delete_document, import_document, list_documents, search_knowledge
+from app.knowledge.service import ask_knowledge, delete_document, import_document, list_documents, search_knowledge
 
 router = APIRouter()
 
@@ -56,6 +56,16 @@ async def search(payload: KnowledgeSearchRequest, user=Depends(current_user)):
         raise AppException(400, "检索内容不能为空")
     results = await run_in_threadpool(search_knowledge, query, payload.top_k)
     return success_response(data={"items": results}, operator=user["username"])
+
+
+@router.post("/knowledge/ask")
+async def ask(payload: KnowledgeSearchRequest, user=Depends(current_user)):
+    """根据检索到的知识上下文调用 Ollama 生成答案。"""
+    query = payload.query.strip()
+    if not query:
+        raise AppException(400, "问题不能为空")
+    result = await run_in_threadpool(ask_knowledge, query, payload.top_k)
+    return success_response(data=result, operator=user["username"])
 
 
 @router.get("/knowledge/documents")

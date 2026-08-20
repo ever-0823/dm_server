@@ -16,6 +16,13 @@ def test_extract_txt_supports_utf8_bom() -> None:
     assert pages == [(1, "设备知识")]
 
 
+def test_split_text_keeps_numbered_answer_with_question() -> None:
+    # 编号问题和其后回答应优先落在同一文本块，避免只检索到问题标题。
+    text = "1. 维护设备前要做什么？\n必须先切断电源并悬挂警示牌。\n2. 故障如何处理？\n先检查电源。"
+    chunks = split_text(text, chunk_size=80, overlap=10)
+    assert any("维护设备前要做什么" in chunk and "切断电源" in chunk for chunk in chunks)
+
+
 if __name__ == "__main__":
     test_split_text_keeps_overlap_and_content()
     test_extract_txt_supports_utf8_bom()
