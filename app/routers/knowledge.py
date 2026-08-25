@@ -1,13 +1,15 @@
+import json
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, UploadFile
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
+from starlette.responses import StreamingResponse
 
 from app.core.exceptions import AppException
 from app.core.responses import success_response
 from app.dependencies.auth import current_user
-from app.knowledge.service import ask_knowledge, delete_document, import_document, list_documents, search_knowledge
+from app import knowledge as knowledge_workflow
 
 router = APIRouter()
 
@@ -39,7 +41,7 @@ async def upload_knowledge_document(file: UploadFile = File(...), user=Depends(c
         raise AppException(413, "文档大小不能超过 20 MB")
 
     document = await run_in_threadpool(
-        import_document,
+        knowledge_workflow.import_document,
         filename,
         file.content_type or "application/octet-stream",
         content,
@@ -54,7 +56,7 @@ async def search(payload: KnowledgeSearchRequest, user=Depends(current_user)):
     query = payload.query.strip()
     if not query:
         raise AppException(400, "检索内容不能为空")
-    results = await run_in_threadpool(search_knowledge, query, payload.top_k)
+    results = await run_in_threadpool(knowledge_workflow.search, query, payload.top_k)
     return success_response(data={"items": results}, operator=user["username"])
 
 
@@ -64,21 +66,36 @@ async def ask(payload: KnowledgeSearchRequest, user=Depends(current_user)):
     query = payload.query.strip()
     if not query:
         raise AppException(400, "问题不能为空")
-    result = await run_in_threadpool(ask_knowledge, query, payload.top_k)
+    result = await run_in_threadpool(knowledge_workflow.ask, query, payload.top_k)
     return success_response(data=result, operator=user["username"])
+
+
+@router.post("/knowledge/ask/stream")
+async def ask_stream(payload: KnowledgeSearchRequest, user=Depends(current_user)):
+    """以 NDJSON 逐段返回检索元数据和 Ollama 答案。"""
+    query = payload.query.strip()
+    if not query:
+        raise AppException(400, "问题不能为空")
+    # 检索和 Embedding 在工作线程完成，避免阻塞 FastAPI 事件循环。
+    events = await run_in_threadpool(knowledge_workflow.stream_answer, query, payload.top_k)
+    body = (
+        (json.dumps(event, ensure_ascii=False) + "\n").encode("utf-8")
+        for event in events
+    )
+    return StreamingResponse(body, media_type="application/x-ndjson")
 
 
 @router.get("/knowledge/documents")
 async def get_documents(user=Depends(current_user)):
     """查询已导入的全部知识文档。"""
-    documents = await run_in_threadpool(list_documents)
+    documents = await run_in_threadpool(knowledge_workflow.list_documents)
     return success_response(data={"items": documents}, operator=user["username"])
 
 
 @router.delete("/knowledge/documents/{document_id}")
 async def remove_document(document_id: int, user=Depends(current_user)):
     """删除文档并依靠外键级联删除所属向量。"""
-    deleted = await run_in_threadpool(delete_document, document_id)
+    deleted = await run_in_threadpool(knowledge_workflow.delete_document, document_id)
     if not deleted:
         raise AppException(404, "知识文档不存在")
     return success_response(message="知识文档删除成功", operator=user["username"])

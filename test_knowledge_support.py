@@ -1,4 +1,4 @@
-from app.knowledge.service import extract_pages, split_text
+from app.knowledge.documents import extract_pages, split_text
 
 
 def test_split_text_keeps_overlap_and_content() -> None:
