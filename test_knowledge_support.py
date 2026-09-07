@@ -1,4 +1,8 @@
 from app.knowledge.documents import extract_pages, split_text
+from app.knowledge.qa import parse_qa_response
+from app.knowledge import workflow
+from app.knowledge.workflow import preview_document
+from app.core.config import settings
 
 
 def test_split_text_keeps_overlap_and_content() -> None:
@@ -21,6 +25,61 @@ def test_split_text_keeps_numbered_answer_with_question() -> None:
     text = "1. 维护设备前要做什么？\n必须先切断电源并悬挂警示牌。\n2. 故障如何处理？\n先检查电源。"
     chunks = split_text(text, chunk_size=80, overlap=10)
     assert any("维护设备前要做什么" in chunk and "切断电源" in chunk for chunk in chunks)
+
+
+def test_split_text_keeps_table_of_contents_in_one_chunk() -> None:
+    # 目录需要作为一个完整文本块，不能因超过普通块大小被拆成多段。
+    text = "目录\n" + "\n".join(f"第{i}章 设备管理制度 ........ {i}" for i in range(1, 31))
+    chunks = split_text(text, chunk_size=100, overlap=20)
+    assert chunks == [text]
+
+
+def test_parse_qa_response_returns_searchable_content() -> None:
+    # QA 内容统一落成问题和答案两行，便于后续直接向量化检索。
+    result = parse_qa_response("问题：维护前需要做什么？\n答案：必须先切断电源。")
+    assert result == {
+        "question": "维护前需要做什么？",
+        "answer": "必须先切断电源。",
+        "content": "问题：维护前需要做什么？\n答案：必须先切断电源。",
+    }
+
+
+def test_preview_document_uses_existing_chunk_rules() -> None:
+    # 预览只提取和切分内容，不依赖 Embedding、Ollama 或 pgvector。
+    result = preview_document("设备规范.txt", "维护前切断电源。".encode("utf-8"))
+    assert result["page_count"] == 1
+    assert result["chunk_count"] == 1
+    assert result["items"][0]["content"] == "维护前切断电源。"
+
+
+def test_search_prioritizes_body_match_over_table_of_contents(monkeypatch) -> None:
+    """正文和目录同时命中时，应优先返回正文文本块。"""
+    toc = {
+        "chunk_id": 1,
+        "content": "目录\n二、资源使用 ........................................ 14",
+        "context": "目录\n二、资源使用 ........................................ 14",
+        "score": 0.31,
+    }
+    body = {
+        "chunk_id": 2,
+        "content": "1) 员工未经批准，不得将公司资产赠予、转让、出租、出借。",
+        "context": "二、资源使用\n" + "1) 员工未经批准，不得将公司资产赠予、转让、出租、出借。",
+        "score": 0.29,
+    }
+    monkeypatch.setattr(
+        workflow.embedding,
+        "encode_query",
+        lambda _query: [0.0] * settings.EMBEDDING_DIMENSIONS,
+    )
+    monkeypatch.setattr(
+        workflow.store,
+        "search_chunks",
+        lambda _vector, _limit: [toc, body],
+    )
+
+    result = workflow.search("资源使用", 1)
+
+    assert result == [body]
 
 
 if __name__ == "__main__":

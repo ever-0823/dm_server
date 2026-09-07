@@ -31,6 +31,8 @@ def _connect(register_types: bool = True):
             dbname=settings.VECTOR_DB_NAME,
             user=settings.VECTOR_DB_USER,
             password=settings.VECTOR_DB_PASSWORD,
+            # 数据库不可达时快速返回明确错误，避免知识库页面长时间卡住。
+            connect_timeout=5,
             row_factory=dict_row,
         )
         # 首次建表前数据库尚无 vector 类型，此时必须先跳过类型注册。
@@ -63,11 +65,19 @@ def ensure_schema() -> None:
                     id BIGSERIAL PRIMARY KEY,
                     original_name VARCHAR(255) NOT NULL,
                     content_type VARCHAR(100) NOT NULL,
+                    processing_mode VARCHAR(30) NOT NULL DEFAULT '正常分割',
                     size_bytes BIGINT NOT NULL,
                     chunk_count INTEGER NOT NULL DEFAULT 0,
                     created_by VARCHAR(100) NOT NULL,
                     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 )
+                """
+            )
+            # 为已经存在的知识文档表补充处理模式字段，旧数据按普通分割兼容。
+            cursor.execute(
+                """
+                ALTER TABLE knowledge_documents
+                ADD COLUMN IF NOT EXISTS processing_mode VARCHAR(30) NOT NULL DEFAULT '正常分割'
                 """
             )
             cursor.execute(
@@ -81,6 +91,21 @@ def ensure_schema() -> None:
                     embedding vector({dimensions}) NOT NULL,
                     UNIQUE(document_id, chunk_index)
                 )
+                """
+            )
+            # 兼容处理模式字段上线前已完成 QA 拆分的文档，避免历史数据被误显示为普通分割。
+            cursor.execute(
+                """
+                UPDATE knowledge_documents AS document
+                SET processing_mode = '问答对提取'
+                WHERE document.processing_mode = '正常分割'
+                  AND EXISTS (
+                      SELECT 1
+                      FROM knowledge_chunks AS chunk
+                      WHERE chunk.document_id = document.id
+                        AND chunk.content LIKE '问题：%'
+                        AND chunk.content LIKE '%答案：%'
+                  )
                 """
             )
             # HNSW 适合知识库持续检索，无需像 IVFFlat 一样预先训练索引。
@@ -100,6 +125,7 @@ def save_document(
     chunks: list[dict],
     vectors: list[list[float]],
     username: str,
+    processing_mode: str = "正常分割",
 ) -> dict:
     """在一个事务中保存文档元数据、文本块和向量。"""
     ensure_schema()
@@ -110,11 +136,11 @@ def save_document(
         cursor.execute(
             """
             INSERT INTO knowledge_documents
-                (original_name, content_type, size_bytes, chunk_count, created_by)
-            VALUES (%s, %s, %s, %s, %s)
-            RETURNING id, original_name, chunk_count, created_at
+                (original_name, content_type, processing_mode, size_bytes, chunk_count, created_by)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            RETURNING id, original_name, processing_mode, chunk_count, created_at
             """,
-            (filename, content_type, size_bytes, len(chunks), username),
+            (filename, content_type, processing_mode, size_bytes, len(chunks), username),
         )
         document = cursor.fetchone()
         cursor.executemany(
@@ -194,12 +220,49 @@ def list_documents() -> list[dict]:
         cursor.execute(
             """
             SELECT id, original_name, content_type, size_bytes,
-                   chunk_count, created_by, created_at
+                   processing_mode, chunk_count, created_by, created_at
             FROM knowledge_documents
             ORDER BY id DESC
             """
         )
         return cursor.fetchall()
+
+
+def get_document_chunks(document_id: int, page: int, page_size: int) -> dict | None:
+    """分页返回指定知识文档及其文本块。"""
+    ensure_schema()
+    with _connect() as connection, connection.cursor() as cursor:
+        # 先读取文档元数据，以便调用方区分空文档和不存在的文档。
+        cursor.execute(
+            """
+            SELECT id, original_name, content_type, size_bytes,
+                   processing_mode, chunk_count, created_by, created_at
+            FROM knowledge_documents
+            WHERE id = %s
+            """,
+            (document_id,),
+        )
+        document = cursor.fetchone()
+        if document is None:
+            return None
+
+        cursor.execute(
+            """
+            SELECT id, chunk_index, page_number, content
+            FROM knowledge_chunks
+            WHERE document_id = %s
+            ORDER BY chunk_index
+            LIMIT %s OFFSET %s
+            """,
+            (document_id, page_size, (page - 1) * page_size),
+        )
+        return {
+            "document": document,
+            "items": cursor.fetchall(),
+            "page": page,
+            "page_size": page_size,
+            "total": document["chunk_count"],
+        }
 
 
 def delete_document(document_id: int) -> bool:

@@ -40,6 +40,10 @@ def split_text(text: str, chunk_size: int, overlap: int) -> list[str]:
     normalized = re.sub(r"[ \t]+", " ", text).strip()
     normalized = re.sub(r"\n{3,}", "\n\n", normalized)
 
+    # PDF 目录通常独占一页；即使超过普通块大小，也要整体保留为一个可识别的目录块。
+    if re.match(r"^目\s*录(?:\s|$)", normalized):
+        return [normalized]
+
     # 中文章节、数字条目通常是问题和答案的语义边界，不在普通句号处强行拆散。
     heading_pattern = re.compile(
         r"^(?:第[一二三四五六七八九十百]+[章节部分]|[一二三四五六七八九十百]+[、.．]|\d+[、.．)])"

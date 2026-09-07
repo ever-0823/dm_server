@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 from starlette.responses import StreamingResponse
@@ -25,9 +25,8 @@ class KnowledgeSearchRequest(BaseModel):
     top_k: int = Field(default=5, ge=1, le=20)
 
 
-@router.post("/knowledge/upload")
-async def upload_knowledge_document(file: UploadFile = File(...), user=Depends(current_user)):
-    """上传文档并完成提取、切分、向量化和入库。"""
+async def _read_document(file: UploadFile) -> tuple[str, bytes]:
+    """统一校验知识文档名称、类型、大小和空内容。"""
     filename = Path(file.filename or "").name
     suffix = Path(filename).suffix.lower()
     if suffix not in ALLOWED_SUFFIXES:
@@ -39,6 +38,25 @@ async def upload_knowledge_document(file: UploadFile = File(...), user=Depends(c
         raise AppException(400, "上传文档不能为空")
     if len(content) > MAX_DOCUMENT_BYTES:
         raise AppException(413, "文档大小不能超过 20 MB")
+    return filename, content
+
+
+@router.post("/knowledge/preview")
+async def preview_knowledge_document(file: UploadFile = File(...), user=Depends(current_user)):
+    """提取并预览文档文本块，不执行向量化和入库。"""
+    filename, content = await _read_document(file)
+    preview = await run_in_threadpool(knowledge_workflow.preview_document, filename, content)
+    return success_response(data=preview, operator=user["username"])
+
+
+@router.post("/knowledge/upload")
+async def upload_knowledge_document(
+    file: UploadFile = File(...),
+    qa_split: bool = Form(False),
+    user=Depends(current_user),
+):
+    """上传文档并完成提取、切分、向量化和入库。"""
+    filename, content = await _read_document(file)
 
     document = await run_in_threadpool(
         knowledge_workflow.import_document,
@@ -46,6 +64,7 @@ async def upload_knowledge_document(file: UploadFile = File(...), user=Depends(c
         file.content_type or "application/octet-stream",
         content,
         user["username"],
+        qa_split,
     )
     return success_response(data=document, message="知识文档导入成功", operator=user["username"])
 
@@ -90,6 +109,20 @@ async def get_documents(user=Depends(current_user)):
     """查询已导入的全部知识文档。"""
     documents = await run_in_threadpool(knowledge_workflow.list_documents)
     return success_response(data={"items": documents}, operator=user["username"])
+
+
+@router.get("/knowledge/documents/{document_id}/chunks")
+async def get_document_chunks(
+    document_id: int,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, ge=1, le=100),
+    user=Depends(current_user),
+):
+    """分页查询指定知识文档的元数据和文本块。"""
+    result = await run_in_threadpool(knowledge_workflow.get_document_chunks, document_id, page, page_size)
+    if result is None:
+        raise AppException(404, "知识文档不存在")
+    return success_response(data=result, operator=user["username"])
 
 
 @router.delete("/knowledge/documents/{document_id}")
