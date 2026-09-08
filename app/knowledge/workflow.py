@@ -2,8 +2,10 @@
 
 import logging
 import time
+from hashlib import sha256
 from collections.abc import Iterator
 from pathlib import Path
+from uuid import uuid4
 
 from app.core.config import settings
 from app.core.exceptions import AppException
@@ -11,6 +13,21 @@ from app.knowledge import answering, documents, embedding, qa, store
 
 
 logger = logging.getLogger(__name__)
+IMAGE_QUERY_MARKERS = (
+    "这张图片",
+    "这张图",
+    "这幅图",
+    "图片里的",
+    "图片中的",
+    "图片里",
+    "图片中",
+    "图中的",
+    "图中",
+    "照片里的",
+    "照片中的",
+    "照片里",
+    "照片中",
+)
 
 
 def _normalize_match_text(value: str | None) -> str:
@@ -122,16 +139,99 @@ def import_document(
     )
 
 
+def import_image(
+    filename: str,
+    knowledge_name: str,
+    content_type: str,
+    image_content: bytes,
+    corrected_text: str,
+    ocr_lines: list[dict],
+    username: str,
+    document_id: int | None = None,
+) -> dict:
+    """新建图片知识库，或把一张 OCR 图片追加到现有知识库。"""
+    final_text = corrected_text.strip()
+    if not final_text:
+        raise AppException(400, "OCR 校正文本不能为空")
+    if document_id is None and not knowledge_name.strip():
+        raise AppException(400, "知识库名称不能为空")
+
+    display_chunks = documents.split_text(
+        final_text,
+        settings.KNOWLEDGE_CHUNK_SIZE,
+        settings.KNOWLEDGE_CHUNK_OVERLAP,
+    )
+    if not display_chunks:
+        raise AppException(400, "OCR 文本未生成有效文本块")
+
+    # 检索文本附带图片文件名和来源类型，展示文本仍保持用户校正后的正文。
+    prefix = (
+        f"知识库名称：{knowledge_name}\n原始图片：{filename}\n"
+        f"来源类型：图片 OCR\n图片大小：{len(image_content)} 字节\n内容："
+    )
+    chunks = [
+        {
+            "page_number": 1,
+            "content": prefix + text,
+            "display_content": text,
+        }
+        for text in display_chunks
+    ]
+    vectors = embedding.encode_documents([chunk["content"] for chunk in chunks])
+    if any(len(vector) != settings.EMBEDDING_DIMENSIONS for vector in vectors):
+        raise AppException(500, "模型输出维度与 EMBEDDING_DIMENSIONS 配置不一致")
+
+    image_dir = Path(settings.UPLOAD_FOLDER) / "knowledge_images"
+    image_dir.mkdir(parents=True, exist_ok=True)
+    suffix = Path(filename).suffix.lower()
+    image_path = image_dir / f"{uuid4().hex}{suffix}"
+    image_path.write_bytes(image_content)
+    try:
+        result = store.append_image(
+            document_id,
+            knowledge_name.strip(),
+            filename,
+            content_type,
+            len(image_content),
+            final_text,
+            ocr_lines,
+            sha256(image_content).hexdigest(),
+            str(image_path.resolve()),
+            chunks,
+            vectors,
+            username,
+        )
+        # 重复图片不需要保留第二份物理文件，已有知识数据保持不变。
+        if result.get("duplicate"):
+            image_path.unlink(missing_ok=True)
+        return result
+    except Exception:
+        # 数据库写入失败时清理刚保存的原图，避免留下无主文件。
+        image_path.unlink(missing_ok=True)
+        raise
+
+
 def search(query: str, top_k: int) -> list[dict]:
     """生成查询向量并从 pgvector 返回相关文本及相邻上下文。"""
     started_at = time.perf_counter()
-    query_vector = embedding.encode_query(query)
+    image_query = any(marker in query for marker in IMAGE_QUERY_MARKERS)
+    clean_query = query
+    if image_query:
+        # 去掉口语化图片指代词，让 Embedding 聚焦真正需要检索的内容。
+        for marker in IMAGE_QUERY_MARKERS:
+            clean_query = clean_query.replace(marker, "")
+        clean_query = clean_query.strip(" ，。？?") or query
+    query_vector = embedding.encode_query(clean_query)
     if len(query_vector) != settings.EMBEDDING_DIMENSIONS:
         raise AppException(500, "模型输出维度与 EMBEDDING_DIMENSIONS 配置不一致")
 
     # 多取少量候选，给正文关键词命中一次重新排序的空间，最终仍只返回 top_k 条。
     candidate_rows = store.search_chunks(query_vector, min(top_k * 4, 80))
-    rows = _prioritize_exact_matches(query, candidate_rows, top_k)
+    rows = _prioritize_exact_matches(clean_query, candidate_rows, len(candidate_rows))
+    if image_query:
+        # 用户明确询问图片时优先展示 OCR 图片知识，分数仍决定同类来源内部顺序。
+        rows.sort(key=lambda row: row.get("source_type") not in {"image", "image_set"})
+    rows = rows[:top_k]
     logger.info(
         "知识库检索完成 query_length=%d top_k=%d result_count=%d elapsed_ms=%.1f",
         len(query),
@@ -160,6 +260,21 @@ def list_documents() -> list[dict]:
 def get_document_chunks(document_id: int, page: int, page_size: int) -> dict | None:
     """分页返回指定知识文档的元数据和文本块。"""
     return store.get_document_chunks(document_id, page, page_size)
+
+
+def get_source_image(document_id: int) -> dict | None:
+    """返回图片知识来源对应的原图文件信息。"""
+    return store.get_source_image(document_id)
+
+
+def list_document_images(document_id: int) -> list[dict]:
+    """返回指定知识库关联的全部 OCR 图片。"""
+    return store.list_document_images(document_id)
+
+
+def get_document_image(document_id: int, image_id: int) -> dict | None:
+    """返回知识库中指定的一张 OCR 原图。"""
+    return store.get_source_image(document_id, image_id)
 
 
 def delete_document(document_id: int) -> bool:

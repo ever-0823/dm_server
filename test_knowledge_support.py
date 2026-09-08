@@ -82,6 +82,58 @@ def test_search_prioritizes_body_match_over_table_of_contents(monkeypatch) -> No
     assert result == [body]
 
 
+def test_image_query_prioritizes_ocr_source(monkeypatch) -> None:
+    """明确提到图片的问题应去除指代词并优先返回 OCR 图片来源。"""
+    encoded_queries: list[str] = []
+    document = {"chunk_id": 1, "content": "电源指示灯", "context": "电源指示灯", "score": 0.9, "source_type": "document"}
+    image = {"chunk_id": 2, "content": "电源指示灯", "context": "电源指示灯", "score": 0.8, "source_type": "image"}
+    monkeypatch.setattr(
+        workflow.embedding,
+        "encode_query",
+        lambda query: encoded_queries.append(query) or [0.0] * settings.EMBEDDING_DIMENSIONS,
+    )
+    monkeypatch.setattr(workflow.store, "search_chunks", lambda _vector, _limit: [document, image])
+
+    result = workflow.search("图片里的电源指示灯", 1)
+
+    assert encoded_queries == ["电源指示灯"]
+    assert result == [image]
+
+
+def test_import_image_separates_display_and_search_text(monkeypatch, tmp_path) -> None:
+    """图片入库应向量化带元数据文本，但归档展示用户校正后的原文。"""
+    saved: dict = {}
+    monkeypatch.setattr(settings, "UPLOAD_FOLDER", str(tmp_path))
+    monkeypatch.setattr(
+        workflow.embedding,
+        "encode_documents",
+        lambda texts: saved.update(vector_texts=texts) or [[0.0] * settings.EMBEDDING_DIMENSIONS for _ in texts],
+    )
+    monkeypatch.setattr(
+        workflow.store,
+        "append_image",
+        lambda *args: saved.update(args=args) or {"id": 1, "chunk_count": len(args[9])},
+    )
+
+    result = workflow.import_image(
+        "SCAN-TEST-001.jpg",
+        "扫码终端故障知识",
+        "image/jpeg",
+        b"image",
+        "电源指示灯不亮",
+        [{"text": "电源指示灯不亮", "bbox": [[1, 2], [3, 2], [3, 4], [1, 4]]}],
+        "tester",
+    )
+
+    chunks = saved["args"][9]
+    assert result["chunk_count"] == 1
+    assert chunks[0]["display_content"] == "电源指示灯不亮"
+    assert "知识库名称：扫码终端故障知识" in saved["vector_texts"][0]
+    assert saved["args"][0] is None
+    assert saved["args"][1] == "扫码终端故障知识"
+    assert saved["args"][2] == "SCAN-TEST-001.jpg"
+
+
 if __name__ == "__main__":
     test_split_text_keeps_overlap_and_content()
     test_extract_txt_supports_utf8_bom()

@@ -59,7 +59,10 @@ def stream_answer(query: str, results: list[dict]) -> Iterator[dict]:
     exact_results = [item for item in trusted_results if contains_query(item)]
     sources = [
         {
+            "document_id": item.get("document_id"),
             "document": item["original_name"],
+            "source_type": item.get("source_type") or "document",
+            "image": item.get("source_image_name"),
             "page": item["page_number"],
             "score": item["score"],
         }
@@ -87,17 +90,22 @@ def stream_answer(query: str, results: list[dict]) -> Iterator[dict]:
                 f"该主题原文共有 {len(item_numbers)} 个编号条目，编号为 "
                 f"{', '.join(item_numbers)}。回答必须逐项覆盖这些编号，不得漏项。\n"
             )
-        context = (
-            f"[来源：{exact_results[0]['original_name']}，第 "
-            f"{exact_results[0]['page_number']} 页]\n{topic_section}"
-        )
+        source_name = exact_results[0]["original_name"]
+        if exact_results[0].get("source_image_name"):
+            source_name += f"，图片：{exact_results[0]['source_image_name']}"
+        context = f"[来源：{source_name}，第 {exact_results[0]['page_number']} 页]\n{topic_section}"
     else:
         completeness_instruction = ""
-        context = "\n\n".join(
-            f"[来源：{item['original_name']}，第 {item['page_number']} 页，相关度 {item['score']:.3f}]\n"
-            f"{item.get('context') or item['content']}"
-            for item in trusted_results
-        )
+        context_parts = []
+        for item in trusted_results:
+            source_name = item["original_name"]
+            if item.get("source_image_name"):
+                source_name += f"，图片：{item['source_image_name']}"
+            context_parts.append(
+                f"[来源：{source_name}，第 {item['page_number']} 页，相关度 {item['score']:.3f}]\n"
+                f"{item.get('context') or item['content']}"
+            )
+        context = "\n\n".join(context_parts)
     # raw 模式绕过 qwen3 旧模板中强制插入的 <think>，直接从最终答案开始生成。
     safe_context = context.replace("<|im_start|>", "＜|im_start|＞").replace("<|im_end|>", "＜|im_end|＞")
     safe_question = question.replace("<|im_start|>", "＜|im_start|＞").replace("<|im_end|>", "＜|im_end|＞")

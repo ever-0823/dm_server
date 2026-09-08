@@ -4,7 +4,7 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
-from starlette.responses import StreamingResponse
+from starlette.responses import FileResponse, StreamingResponse
 
 from app.core.exceptions import AppException
 from app.core.responses import success_response
@@ -123,6 +123,39 @@ async def get_document_chunks(
     if result is None:
         raise AppException(404, "知识文档不存在")
     return success_response(data=result, operator=user["username"])
+
+
+@router.get("/knowledge/documents/{document_id}/source-image")
+async def get_source_image(document_id: int, user=Depends(current_user)):
+    """兼容旧前端，读取图片知识库中的第一张原图。"""
+    source = await run_in_threadpool(knowledge_workflow.get_source_image, document_id)
+    if source is None:
+        raise AppException(404, "原图不存在")
+    return FileResponse(
+        source["path"],
+        media_type=source["content_type"],
+        filename=source["filename"],
+    )
+
+
+@router.get("/knowledge/documents/{document_id}/images")
+async def get_document_images(document_id: int, user=Depends(current_user)):
+    """返回图片知识库中的全部图片摘要。"""
+    images = await run_in_threadpool(knowledge_workflow.list_document_images, document_id)
+    return success_response(data={"items": images}, operator=user["username"])
+
+
+@router.get("/knowledge/documents/{document_id}/images/{image_id}")
+async def get_document_image(document_id: int, image_id: int, user=Depends(current_user)):
+    """下载图片知识库中的指定原图。"""
+    source = await run_in_threadpool(knowledge_workflow.get_document_image, document_id, image_id)
+    if source is None:
+        raise AppException(404, "原图不存在")
+    return FileResponse(
+        source["path"],
+        media_type=source["content_type"],
+        filename=source["filename"],
+    )
 
 
 @router.delete("/knowledge/documents/{document_id}")

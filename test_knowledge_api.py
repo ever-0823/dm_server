@@ -179,3 +179,27 @@ def test_knowledge_document_chunks_api(monkeypatch) -> None:
     assert response.json()["data"]["document"]["id"] == 7
     assert response.json()["data"]["items"][0]["content"] == "维护前切断电源。"
     assert response.json()["data"]["page_size"] == 50
+
+
+def test_knowledge_source_image_api(monkeypatch, tmp_path) -> None:
+    """图片来源接口应返回原图文件，而不是暴露服务器路径。"""
+    app = create_app()
+    app.dependency_overrides[current_user] = lambda: {"username": "test_user"}
+    image_path = tmp_path / "device.png"
+    image_path.write_bytes(b"image-content")
+    monkeypatch.setattr(
+        "app.routers.knowledge.knowledge_workflow.get_source_image",
+        lambda _document_id: {
+            "path": str(image_path),
+            "filename": "device.png",
+            "content_type": "image/png",
+        },
+    )
+    try:
+        response = TestClient(app).get("/api/knowledge/documents/7/source-image")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert response.content == b"image-content"
+    assert response.headers["content-type"] == "image/png"

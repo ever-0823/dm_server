@@ -66,10 +66,26 @@ def _to_lines(results: list[Any]) -> list[dict]:
         result = data.get("res", data) if isinstance(data, dict) else {}
         texts = result.get("rec_texts") or []
         scores = result.get("rec_scores") or []
+        boxes = result.get("rec_boxes") or result.get("dt_polys") or []
 
         for index, text in enumerate(texts):
             line = {"text": str(text), "score": None}
             if index < len(scores):
                 line["score"] = float(scores[index])
+            if index < len(boxes):
+                # 坐标保留为普通列表，便于接口返回和后续写入 JSONB。
+                line["bbox"] = _to_bbox(boxes[index])
             lines.append(line)
     return lines
+
+
+def _to_bbox(value: Any) -> list[list[float]]:
+    """把矩形或多边形坐标统一转换为四个顶点。"""
+    try:
+        points = value.tolist() if hasattr(value, "tolist") else value
+        if len(points) == 4 and not isinstance(points[0], (list, tuple)):
+            left, top, right, bottom = (float(number) for number in points)
+            return [[left, top], [right, top], [right, bottom], [left, bottom]]
+        return [[float(point[0]), float(point[1])] for point in points]
+    except (TypeError, IndexError, ValueError):
+        return []
