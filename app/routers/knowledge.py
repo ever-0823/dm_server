@@ -13,8 +13,8 @@ from app import knowledge as knowledge_workflow
 
 router = APIRouter()
 
-# 第一阶段仅接收可稳定提取正文的 PDF 和 TXT，并限制内存上传大小。
-ALLOWED_SUFFIXES = {".pdf", ".txt"}
+# 文档解析统一交给 Docling，TXT 仍由标准库读取，并限制内存上传大小。
+ALLOWED_SUFFIXES = {".pdf", ".docx", ".pptx", ".xlsx", ".html", ".htm", ".txt"}
 MAX_DOCUMENT_BYTES = 20 * 1024 * 1024
 
 
@@ -30,7 +30,7 @@ async def _read_document(file: UploadFile) -> tuple[str, bytes]:
     filename = Path(file.filename or "").name
     suffix = Path(filename).suffix.lower()
     if suffix not in ALLOWED_SUFFIXES:
-        raise AppException(400, "仅支持 PDF、TXT 文档")
+        raise AppException(400, "仅支持 PDF、DOCX、PPTX、XLSX、HTML、TXT 文档")
 
     # 多读取一个字节，以便准确区分合法文件和超出限制的文件。
     content = await file.read(MAX_DOCUMENT_BYTES + 1)

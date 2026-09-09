@@ -45,6 +45,12 @@ class Settings:
         os.path.join(BASE_DIR, ".embedding_models"),
     )
 
+    # Docling 使用预下载模型离线解析 PDF，避免运行时访问 Hugging Face 导致超时。
+    DOCLING_ARTIFACTS_PATH = os.getenv(
+        "DOCLING_ARTIFACTS_PATH",
+        os.path.join(os.path.expanduser("~"), ".cache", "docling", "models"),
+    )
+
     # 文本块保留少量重叠，避免答案恰好落在两个块的边界上。
     KNOWLEDGE_CHUNK_SIZE = int(os.getenv("KNOWLEDGE_CHUNK_SIZE", "600"))
     KNOWLEDGE_CHUNK_OVERLAP = int(os.getenv("KNOWLEDGE_CHUNK_OVERLAP", "80"))

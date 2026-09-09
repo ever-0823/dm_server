@@ -8,7 +8,7 @@ from app.core.exceptions import AppException
 from app.core.responses import success_response
 from app.dependencies.auth import current_user
 from app import knowledge as knowledge_workflow
-from app.ocr.ppocrv6 import OcrUnavailable, recognize_text
+from app.ocr.ppocrv6 import OcrUnavailable, recognize_table, recognize_text
 
 router = APIRouter()
 
@@ -46,6 +46,23 @@ async def ppocrv6(file: UploadFile = File(...), user=Depends(current_user)):
     return success_response(
         message="识别完成",
         data={"text": "\n".join(line["text"] for line in lines), "lines": lines},
+        operator=user["username"],
+    )
+
+
+@router.post("/knowledge/table/parse")
+async def parse_table(file: UploadFile = File(...), user=Depends(current_user)):
+    """识别表格图片并返回包含坐标和置信度的通用 JSON。"""
+    _filename, suffix, content = await _read_image(file)
+
+    try:
+        data = await run_in_threadpool(recognize_table, content, suffix)
+    except OcrUnavailable as exc:
+        raise AppException(503, str(exc)) from exc
+
+    return success_response(
+        message="表格识别完成",
+        data=data,
         operator=user["username"],
     )
 

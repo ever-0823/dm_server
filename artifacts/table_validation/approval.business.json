@@ -1,0 +1,151 @@
+{
+  "document_title": "价钱、合同审批材料表",
+  "sections": [
+    {
+      "name": "相关信息",
+      "fields": [
+        {
+          "name": "合同内容",
+          "value": "采买订书器等办公用品",
+          "confidence": 0.95,
+          "status": "待确认"
+        },
+        {
+          "name": "合同申请单位",
+          "value": "学校工会",
+          "confidence": 0.92,
+          "status": "待确认"
+        },
+        {
+          "name": "对方单位",
+          "value": "希绍小学.",
+          "confidence": 0.55,
+          "status": "待确认"
+        },
+        {
+          "name": "申请单位领导",
+          "value": "王小二",
+          "confidence": 0.99,
+          "status": "待确认"
+        },
+        {
+          "name": "经办人/电话",
+          "value": "孙涛.",
+          "confidence": null,
+          "status": "待确认"
+        }
+      ]
+    },
+    {
+      "name": "价格审批",
+      "fields": [
+        {
+          "name": "收到日期",
+          "value": "2023,12.13.",
+          "confidence": 0.96,
+          "status": "待确认"
+        },
+        {
+          "name": "审结日期",
+          "value": "2023.12.13",
+          "confidence": null,
+          "status": "待确认"
+        },
+        {
+          "name": "对方报价",
+          "value": {
+            "订书器": "395620元",
+            "起钉器": "526300元",
+            "合计": "921920元"
+          },
+          "confidence": 1.0,
+          "status": "待确认"
+        },
+        {
+          "name": "核准价格（金额： 元）",
+          "value": "玖拾威万直件玖西贰拾\n921920",
+          "confidence": null,
+          "status": "待确认"
+        },
+        {
+          "name": "审核人",
+          "value": "范冰冰.",
+          "confidence": 0.91,
+          "status": "待确认"
+        },
+        {
+          "name": "价格处处长",
+          "value": "汪峰",
+          "confidence": 0.98,
+          "status": "待确认"
+        },
+        {
+          "name": "价格委员会",
+          "value": {
+            "质量管理部": "刘烧庆 技术中心",
+            "成龙2023/12/14": "",
+            "生产指挥部": "谢霆锋",
+            "技术部": "刘德华2023|12/14",
+            "发展计划部": "小沈阳.",
+            "审计法规部": "胡歌.",
+            "备注": ""
+          },
+          "confidence": null,
+          "status": "待确认"
+        },
+        {
+          "name": "财务管理部部长",
+          "value": "孙何2023/12/15",
+          "confidence": 0.92,
+          "status": "待确认"
+        },
+        {
+          "name": "雷佳言2023/12/15",
+          "value": "",
+          "confidence": 0.91,
+          "status": "待确认"
+        },
+        {
+          "name": "总经理",
+          "value": "",
+          "confidence": null,
+          "status": "待确认"
+        }
+      ]
+    },
+    {
+      "name": "资金审核",
+      "fields": [
+        {
+          "name": "计划通知单",
+          "value": "",
+          "confidence": null,
+          "status": "待确认"
+        },
+        {
+          "name": "付款方式",
+          "value": "",
+          "confidence": null,
+          "status": "待确认"
+        },
+        {
+          "name": "审核意见",
+          "value": "",
+          "confidence": null,
+          "status": "待确认"
+        }
+      ]
+    },
+    {
+      "name": "未分类",
+      "fields": [
+        {
+          "name": "分管人审批",
+          "value": "王一博2023/12/17",
+          "confidence": 0.87,
+          "status": "待确认"
+        }
+      ]
+    }
+  ]
+}

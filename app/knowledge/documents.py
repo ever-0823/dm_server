@@ -1,13 +1,37 @@
 """知识文档文本提取与切分实现。"""
 
-import io
 import re
+import tempfile
+from functools import lru_cache
+from pathlib import Path
 
+from app.core.config import settings
 from app.core.exceptions import AppException
 
 
+@lru_cache(maxsize=1)
+def _document_converter():
+    """复用 Docling 转换器，避免每次导入文档都重新初始化解析管线。"""
+    try:
+        from docling.datamodel.base_models import InputFormat
+        from docling.datamodel.pipeline_options import PdfPipelineOptions
+        from docling.document_converter import DocumentConverter, PdfFormatOption
+    except ImportError as exc:
+        raise AppException(503, "Docling 解析依赖未安装，请执行 pip install docling") from exc
+
+    artifacts_path = Path(settings.DOCLING_ARTIFACTS_PATH)
+    if not artifacts_path.is_dir():
+        raise AppException(503, f"Docling 模型未下载，请先准备本地模型目录：{artifacts_path}")
+
+    # PDF 解析固定读取本地模型，防止业务请求期间临时联网下载而超时。
+    pdf_options = PdfPipelineOptions(artifacts_path=artifacts_path)
+    return DocumentConverter(
+        format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=pdf_options)}
+    )
+
+
 def extract_pages(content: bytes, suffix: str) -> list[tuple[int, str]]:
-    """从 TXT 或可复制文本的 PDF 中提取按页组织的正文。"""
+    """使用标准库读取 TXT，使用 Docling 解析结构化文档。"""
     if suffix == ".txt":
         try:
             text = content.decode("utf-8-sig")
@@ -18,17 +42,39 @@ def extract_pages(content: bytes, suffix: str) -> list[tuple[int, str]]:
                 raise AppException(400, "TXT 编码无法识别，请使用 UTF-8 或 GB18030") from exc
         return [(1, text)]
 
-    try:
-        from pypdf import PdfReader
-    except ImportError as exc:
-        raise AppException(503, "PDF 解析依赖 pypdf 未安装") from exc
+    if suffix not in {".pdf", ".docx", ".pptx", ".xlsx", ".html", ".htm"}:
+        raise AppException(400, "仅支持 PDF、DOCX、PPTX、XLSX、HTML、TXT 文档")
 
+    temp_path: Path | None = None
     try:
-        reader = PdfReader(io.BytesIO(content))
-        # 页码从 1 开始，便于前端直接展示来源位置。
-        return [(index, page.extract_text() or "") for index, page in enumerate(reader.pages, start=1)]
+        # Docling 接收文件路径，临时文件结束后立即清理，不把用户文档留在服务器临时目录。
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as temp_file:
+            temp_file.write(content)
+            temp_path = Path(temp_file.name)
+
+        document = _document_converter().convert(str(temp_path)).document
+        page_numbers = sorted(int(page_number) for page_number in (getattr(document, "pages", {}) or {}))
+        if page_numbers:
+            # PDF 等分页文档按页导出，继续为知识库来源保留真实页码。
+            pages = [
+                (page_number, document.export_to_markdown(page_no=page_number).strip())
+                for page_number in page_numbers
+            ]
+            return [(page_number, text) for page_number, text in pages if text]
+
+        markdown = document.export_to_markdown().strip()
+        if not markdown:
+            return []
+        # DOCX、HTML 等没有稳定分页信息时统一作为第 1 页处理。
+        return [(1, markdown)]
+    except AppException:
+        # 保留依赖或模型缺失的原始状态码，方便前端展示准确处理建议。
+        raise
     except Exception as exc:
-        raise AppException(400, f"PDF 文件解析失败：{exc}") from exc
+        raise AppException(400, f"Docling 文档解析失败：{exc}") from exc
+    finally:
+        if temp_path:
+            temp_path.unlink(missing_ok=True)
 
 
 def split_text(text: str, chunk_size: int, overlap: int) -> list[str]:

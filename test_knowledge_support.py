@@ -1,8 +1,85 @@
-from app.knowledge.documents import extract_pages, split_text
+import pytest
+
+from app.knowledge.documents import _document_converter, extract_pages, split_text
 from app.knowledge.qa import parse_qa_response
 from app.knowledge import workflow
 from app.knowledge.workflow import preview_document
 from app.core.config import settings
+from app.core.exceptions import AppException
+
+
+def test_extract_docling_document(monkeypatch, tmp_path) -> None:
+    """文档格式应通过 Docling 转为保留结构的 Markdown。"""
+    import sys
+    from types import ModuleType, SimpleNamespace
+
+    received_options: dict = {}
+
+    class FakeConverter:
+        def __init__(self, **options):
+            received_options.update(options)
+
+        def convert(self, path: str):
+            assert path.endswith(".pdf")
+            return SimpleNamespace(
+                document=SimpleNamespace(
+                    pages={1: object(), 2: object()},
+                    export_to_markdown=lambda page_no=None: {
+                        1: "# 设备规范",
+                        2: "维护前切断电源。",
+                    }[page_no],
+                )
+            )
+
+    class FakePdfFormatOption:
+        def __init__(self, pipeline_options):
+            self.pipeline_options = pipeline_options
+
+    fake_module = ModuleType("docling.document_converter")
+    fake_module.DocumentConverter = FakeConverter
+    fake_module.PdfFormatOption = FakePdfFormatOption
+    monkeypatch.setitem(sys.modules, "docling.document_converter", fake_module)
+    monkeypatch.setattr(settings, "DOCLING_ARTIFACTS_PATH", str(tmp_path))
+    _document_converter.cache_clear()
+
+    pages = extract_pages(b"fake-pdf", ".pdf")
+
+    assert pages == [(1, "# 设备规范"), (2, "维护前切断电源。")]
+    assert received_options["format_options"]
+    _document_converter.cache_clear()
+
+
+def test_extract_docling_document_reports_missing_models(monkeypatch, tmp_path) -> None:
+    """本地模型缺失时应直接返回可处理的服务异常，不应包装为普通文件错误。"""
+    monkeypatch.setattr(settings, "DOCLING_ARTIFACTS_PATH", str(tmp_path / "missing"))
+    _document_converter.cache_clear()
+
+    with pytest.raises(AppException) as exc_info:
+        extract_pages(b"fake-pdf", ".pdf")
+
+    assert exc_info.value.code == 503
+    assert "Docling 模型未下载" in exc_info.value.message
+    _document_converter.cache_clear()
+
+
+
+
+def test_nested_business_table_uses_merged_section_cell() -> None:
+    """纵向合并的首列应成为 section，其余单元格应嵌套为 fields。"""
+    from app.ocr.ppocrv6 import _to_nested_business_table
+
+    result = _to_nested_business_table([
+        {"text": "审批表", "row": 0, "column": 0, "row_span": 1, "column_span": 4, "score": 0.95},
+        {"text": "相关信息", "row": 1, "column": 0, "row_span": 2, "column_span": 1, "score": 0.95},
+        {"text": "合同内容", "row": 1, "column": 1, "row_span": 1, "column_span": 1, "score": 0.95},
+        {"text": "采购设备", "row": 1, "column": 2, "row_span": 1, "column_span": 2, "score": 0.9},
+        {"text": "申请单位", "row": 2, "column": 1, "row_span": 1, "column_span": 1, "score": 0.95},
+        {"text": "某某公司", "row": 2, "column": 2, "row_span": 1, "column_span": 2, "score": 0.9},
+    ])
+
+    assert result["document_title"] == "审批表"
+    assert result["sections"][0]["name"] == "相关信息"
+    assert len(result["sections"][0]["fields"]) == 2
 
 
 def test_split_text_keeps_overlap_and_content() -> None:
