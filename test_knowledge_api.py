@@ -36,6 +36,21 @@ def test_knowledge_preview_api_does_not_store_document(monkeypatch) -> None:
     assert response.json()["data"]["chunk_count"] == 1
 
 
+def test_knowledge_preview_rejects_removed_office_formats() -> None:
+    """移除 Docling 后，Office 文档必须在上传边界直接拒绝。"""
+    app = create_app()
+    app.dependency_overrides[current_user] = lambda: {"username": "test_user"}
+    try:
+        response = TestClient(app).post(
+            "/api/knowledge/preview",
+            files={"file": ("设备规范.docx", b"office-content", "application/octet-stream")},
+        )
+    finally:
+        app.dependency_overrides.clear()
+    assert response.status_code == 400
+    assert "仅支持 PDF、TXT" in response.json()["message"]
+
+
 def test_knowledge_upload_forwards_qa_split(monkeypatch) -> None:
     """上传接口应把 QA 拆分开关传给知识库工作流。"""
     app = create_app()
@@ -47,12 +62,13 @@ def test_knowledge_upload_forwards_qa_split(monkeypatch) -> None:
     received: dict = {}
 
     # 使用内存替身检查参数传递，避免测试加载模型或写入 pgvector。
-    def fake_import(filename, content_type, content, username, qa_split=False):
+    def fake_import(filename, content_type, content, username, qa_split=False, document_id=None):
         received.update(
             filename=filename,
             content=content,
             username=username,
             qa_split=qa_split,
+            document_id=document_id,
         )
         return {"id": 1, "chunk_count": 1}
 
@@ -63,7 +79,7 @@ def test_knowledge_upload_forwards_qa_split(monkeypatch) -> None:
     try:
         response = TestClient(app).post(
             "/api/knowledge/upload",
-            data={"qa_split": "true"},
+            data={"qa_split": "true", "document_id": "7"},
             files={"file": ("设备规范.txt", "维护前切断电源。".encode("utf-8"), "text/plain")},
         )
     finally:
@@ -72,6 +88,7 @@ def test_knowledge_upload_forwards_qa_split(monkeypatch) -> None:
     assert response.status_code == 200
     assert received["filename"] == "设备规范.txt"
     assert received["qa_split"] is True
+    assert received["document_id"] == 7
 
 
 def test_knowledge_search_api(monkeypatch) -> None:
@@ -203,3 +220,29 @@ def test_knowledge_source_image_api(monkeypatch, tmp_path) -> None:
     assert response.status_code == 200
     assert response.content == b"image-content"
     assert response.headers["content-type"] == "image/png"
+
+
+def test_knowledge_document_images_api(monkeypatch) -> None:
+    """图片列表路由应通过知识库公共入口返回图片摘要。"""
+    app = create_app()
+    app.dependency_overrides[current_user] = lambda: {"username": "test_user"}
+    monkeypatch.setattr(
+        "app.routers.knowledge.knowledge_workflow.list_document_images",
+        lambda _document_id: [
+            {
+                "id": 11,
+                "document_id": 7,
+                "image_index": 1,
+                "original_name": "device.png",
+                "content_type": "image/png",
+                "size_bytes": 12,
+            }
+        ],
+    )
+    try:
+        response = TestClient(app).get("/api/knowledge/documents/7/images")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert response.json()["data"]["items"][0]["original_name"] == "device.png"

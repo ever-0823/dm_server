@@ -10,6 +10,7 @@ from uuid import uuid4
 from app.core.config import settings
 from app.core.exceptions import AppException
 from app.knowledge import answering, documents, embedding, qa, store
+from app.ocr.glm_ocr import markdown_to_text
 
 
 logger = logging.getLogger(__name__)
@@ -108,8 +109,9 @@ def import_document(
     content: bytes,
     username: str,
     qa_split: bool = False,
+    document_id: int | None = None,
 ) -> dict:
-    """提取、切分并向量化文档，最后在一个事务中写入 pgvector。"""
+    """提取、切分并向量化文档，可新建或追加到已有知识库。"""
     _pages, chunks = _extract_chunks(filename, content)
 
     if qa_split:
@@ -128,6 +130,15 @@ def import_document(
 
     # 将用户在导入向导中选择的处理方式随文档元数据一起保存。
     processing_mode = "问答对提取" if qa_split else "正常分割"
+    if document_id is not None:
+        # 目标 ID 存在时只追加文本块，不创建新的知识库列表项。
+        return store.append_document(
+            document_id,
+            filename,
+            len(content),
+            chunks,
+            vectors,
+        )
     return store.save_document(
         filename,
         content_type,
@@ -144,27 +155,31 @@ def import_image(
     knowledge_name: str,
     content_type: str,
     image_content: bytes,
-    corrected_text: str,
-    ocr_lines: list[dict],
+    markdown_content: str,
+    regions: list[dict],
     username: str,
     document_id: int | None = None,
 ) -> dict:
     """新建图片知识库，或把一张 OCR 图片追加到现有知识库。"""
-    final_text = corrected_text.strip()
-    if not final_text:
-        raise AppException(400, "OCR 校正文本不能为空")
+    markdown = markdown_content.strip()
+    if not markdown:
+        raise AppException(400, "OCR Markdown 不能为空")
     if document_id is None and not knowledge_name.strip():
         raise AppException(400, "知识库名称不能为空")
 
+    # 归档保存用户校正后的 Markdown，向量化只使用可见文字。
+    searchable = markdown_to_text(markdown)
+    if not searchable:
+        raise AppException(400, "Markdown 未提取到可检索文字")
     display_chunks = documents.split_text(
-        final_text,
+        searchable,
         settings.KNOWLEDGE_CHUNK_SIZE,
         settings.KNOWLEDGE_CHUNK_OVERLAP,
     )
     if not display_chunks:
-        raise AppException(400, "OCR 文本未生成有效文本块")
+        raise AppException(400, "OCR Markdown 未生成有效文本块")
 
-    # 检索文本附带图片文件名和来源类型，展示文本仍保持用户校正后的正文。
+    # 检索文本附带图片文件名和来源类型，展示文本仍使用可见正文。
     prefix = (
         f"知识库名称：{knowledge_name}\n原始图片：{filename}\n"
         f"来源类型：图片 OCR\n图片大小：{len(image_content)} 字节\n内容："
@@ -193,8 +208,8 @@ def import_image(
             filename,
             content_type,
             len(image_content),
-            final_text,
-            ocr_lines,
+            markdown,
+            regions,
             sha256(image_content).hexdigest(),
             str(image_path.resolve()),
             chunks,

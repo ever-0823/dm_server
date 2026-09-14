@@ -99,8 +99,8 @@ def ensure_schema() -> None:
                     content_type VARCHAR(100) NOT NULL,
                     source_path TEXT NOT NULL,
                     size_bytes BIGINT NOT NULL,
-                    corrected_text TEXT NOT NULL,
-                    ocr_lines JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    markdown_content TEXT NOT NULL,
+                    regions JSONB NOT NULL DEFAULT '[]'::jsonb,
                     content_hash VARCHAR(64),
                     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                     UNIQUE(document_id, image_index),
@@ -123,6 +123,26 @@ def ensure_schema() -> None:
                 )
                 """
             )
+            # 旧字段直接改名，旧后端将无法再读取图片知识内容。
+            cursor.execute(
+                """
+                DO $$
+                BEGIN
+                    IF EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name = 'knowledge_images' AND column_name = 'corrected_text'
+                    ) THEN
+                        ALTER TABLE knowledge_images RENAME COLUMN corrected_text TO markdown_content;
+                    END IF;
+                    IF EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name = 'knowledge_images' AND column_name = 'ocr_lines'
+                    ) THEN
+                        ALTER TABLE knowledge_images RENAME COLUMN ocr_lines TO regions;
+                    END IF;
+                END $$;
+                """
+            )
             # 检索文本可带元数据，展示时仍使用用户校正后的原文。
             cursor.execute("ALTER TABLE knowledge_chunks ADD COLUMN IF NOT EXISTS display_content TEXT")
             cursor.execute(
@@ -136,7 +156,7 @@ def ensure_schema() -> None:
                 """
                 INSERT INTO knowledge_images
                     (document_id, image_index, original_name, content_type, source_path,
-                     size_bytes, corrected_text, ocr_lines)
+                     size_bytes, markdown_content, regions)
                 SELECT document.id,
                        1,
                        COALESCE(NULLIF(document.source_metadata->>'original_filename', ''), document.original_name),
@@ -266,14 +286,88 @@ def save_document(
     return document
 
 
+def append_document(
+    document_id: int,
+    filename: str,
+    size_bytes: int,
+    chunks: list[dict],
+    vectors: list[list[float]],
+) -> dict:
+    """把 PDF/TXT 文本块追加到已有知识库，并在同一事务内更新统计信息。"""
+    ensure_schema()
+    from pgvector import Vector
+
+    with _connect() as connection, connection.cursor() as cursor:
+        # 锁定知识库主体，保证并发导入时文本块序号不会重复。
+        cursor.execute(
+            """
+            SELECT id, original_name, content_type, processing_mode, source_type,
+                   source_metadata, source_path, size_bytes, chunk_count,
+                   created_by, created_at
+            FROM knowledge_documents
+            WHERE id = %s
+            FOR UPDATE
+            """,
+            (document_id,),
+        )
+        document = cursor.fetchone()
+        if document is None:
+            raise AppException(404, "目标知识库不存在")
+
+        cursor.execute(
+            """
+            SELECT COALESCE(MAX(chunk_index), -1) + 1 AS next_chunk_index
+            FROM knowledge_chunks
+            WHERE document_id = %s
+            """,
+            (document_id,),
+        )
+        next_chunk_index = cursor.fetchone()["next_chunk_index"]
+        cursor.executemany(
+            """
+            INSERT INTO knowledge_chunks
+                (document_id, chunk_index, page_number, content, display_content, embedding)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            """,
+            [
+                (
+                    document_id,
+                    next_chunk_index + index,
+                    chunk["page_number"],
+                    chunk["content"],
+                    chunk.get("display_content") or chunk["content"],
+                    Vector(vectors[index]),
+                )
+                for index, chunk in enumerate(chunks)
+            ],
+        )
+        cursor.execute(
+            """
+            UPDATE knowledge_documents
+            SET size_bytes = size_bytes + %s,
+                chunk_count = chunk_count + %s
+            WHERE id = %s
+            RETURNING id, original_name, processing_mode, source_type,
+                      size_bytes, chunk_count, created_at
+            """,
+            (size_bytes, len(chunks), document_id),
+        )
+        result = cursor.fetchone()
+    return {
+        **result,
+        "added_chunk_count": len(chunks),
+        "appended_filename": filename,
+    }
+
+
 def append_image(
     document_id: int | None,
     knowledge_name: str,
     filename: str,
     content_type: str,
     size_bytes: int,
-    corrected_text: str,
-    ocr_lines: list[dict],
+    markdown_content: str,
+    regions: list[dict],
     content_hash: str,
     source_path: str,
     chunks: list[dict],
@@ -358,7 +452,7 @@ def append_image(
             """
             INSERT INTO knowledge_images
                 (document_id, image_index, original_name, content_type, source_path,
-                 size_bytes, corrected_text, ocr_lines, content_hash)
+                 size_bytes, markdown_content, regions, content_hash)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s)
             RETURNING id
             """,
@@ -369,8 +463,8 @@ def append_image(
                 content_type,
                 source_path,
                 size_bytes,
-                corrected_text,
-                json.dumps(ocr_lines, ensure_ascii=False),
+                markdown_content,
+                json.dumps(regions, ensure_ascii=False),
                 content_hash,
             ),
         )

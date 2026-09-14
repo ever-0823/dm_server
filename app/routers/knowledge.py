@@ -13,8 +13,8 @@ from app import knowledge as knowledge_workflow
 
 router = APIRouter()
 
-# 文档解析统一交给 Docling，TXT 仍由标准库读取，并限制内存上传大小。
-ALLOWED_SUFFIXES = {".pdf", ".docx", ".pptx", ".xlsx", ".html", ".htm", ".txt"}
+# PDF 交给本地 GLM-OCR，TXT 仍由标准库读取，并限制内存上传大小。
+ALLOWED_SUFFIXES = {".pdf", ".txt"}
 MAX_DOCUMENT_BYTES = 20 * 1024 * 1024
 
 
@@ -30,7 +30,7 @@ async def _read_document(file: UploadFile) -> tuple[str, bytes]:
     filename = Path(file.filename or "").name
     suffix = Path(filename).suffix.lower()
     if suffix not in ALLOWED_SUFFIXES:
-        raise AppException(400, "仅支持 PDF、DOCX、PPTX、XLSX、HTML、TXT 文档")
+        raise AppException(400, "仅支持 PDF、TXT 文档")
 
     # 多读取一个字节，以便准确区分合法文件和超出限制的文件。
     content = await file.read(MAX_DOCUMENT_BYTES + 1)
@@ -48,14 +48,15 @@ async def preview_knowledge_document(file: UploadFile = File(...), user=Depends(
     preview = await run_in_threadpool(knowledge_workflow.preview_document, filename, content)
     return success_response(data=preview, operator=user["username"])
 
-
+# 导入 PDF 或 TXT 文档并触发提取、切分、向量化和入库。
 @router.post("/knowledge/upload")
 async def upload_knowledge_document(
     file: UploadFile = File(...),
     qa_split: bool = Form(False),
+    document_id: int | None = Form(None),
     user=Depends(current_user),
 ):
-    """上传文档并完成提取、切分、向量化和入库。"""
+    """上传文档并新建知识库，或追加到已有知识库。"""
     filename, content = await _read_document(file)
 
     document = await run_in_threadpool(
@@ -65,6 +66,7 @@ async def upload_knowledge_document(
         content,
         user["username"],
         qa_split,
+        document_id,
     )
     return success_response(data=document, message="知识文档导入成功", operator=user["username"])
 

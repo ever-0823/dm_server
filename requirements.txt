@@ -4,16 +4,14 @@ python-multipart
 python-dotenv
 pymysql
 bcrypt
-paddlepaddle
-paddleocr
 # 用于运行后端接口测试。
 pytest
 # Qwen3 Embedding 本地推理。
 torch>=2.6,<3
 sentence-transformers>=5,<6
 modelscope>=1.28,<2
-# Docling 负责 PDF、Office 和 HTML 文档的结构化解析。
-docling>=2.0,<3
+# GLM-OCR 调用本地 Ollama，并使用 PP-DocLayoutV3 完成布局检测。
+glmocr[selfhosted]>=0.1.5,<0.2
 # PostgreSQL 连接和 pgvector 类型适配。
 psycopg[binary]>=3.2,<4
 pgvector>=0.4,<1

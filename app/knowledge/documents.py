@@ -1,37 +1,40 @@
 """知识文档文本提取与切分实现。"""
 
 import re
-import tempfile
-from functools import lru_cache
-from pathlib import Path
 
 from app.core.config import settings
 from app.core.exceptions import AppException
+from app.ocr.glm_ocr import OcrUnavailable, parse_pages
 
 
-@lru_cache(maxsize=1)
-def _document_converter():
-    """复用 Docling 转换器，避免每次导入文档都重新初始化解析管线。"""
+def _pdf_page_count(content: bytes) -> int:
+    """在进入耗时 OCR 前读取 PDF 页数并验证文件结构。"""
     try:
-        from docling.datamodel.base_models import InputFormat
-        from docling.datamodel.pipeline_options import PdfPipelineOptions
-        from docling.document_converter import DocumentConverter, PdfFormatOption
+        import pymupdf
     except ImportError as exc:
-        raise AppException(503, "Docling 解析依赖未安装，请执行 pip install docling") from exc
+        raise AppException(503, "GLM-OCR PDF 依赖未安装，请重新安装后端依赖") from exc
+    try:
+        with pymupdf.open(stream=content, filetype="pdf") as document:
+            return len(document)
+    except Exception as exc:
+        raise AppException(400, "PDF 文件损坏或格式无法识别") from exc
 
-    artifacts_path = Path(settings.DOCLING_ARTIFACTS_PATH)
-    if not artifacts_path.is_dir():
-        raise AppException(503, f"Docling 模型未下载，请先准备本地模型目录：{artifacts_path}")
 
-    # PDF 解析固定读取本地模型，防止业务请求期间临时联网下载而超时。
-    pdf_options = PdfPipelineOptions(artifacts_path=artifacts_path)
-    return DocumentConverter(
-        format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=pdf_options)}
-    )
+def _pdf_native_text(content: bytes) -> list[str]:
+    """优先读取 PDF 文本层，避免可复制文档再走一遍 OCR。"""
+    try:
+        import pymupdf
+    except ImportError as exc:
+        raise AppException(503, "GLM-OCR PDF 依赖未安装，请重新安装后端依赖") from exc
+    try:
+        with pymupdf.open(stream=content, filetype="pdf") as document:
+            return [page.get_text("text").strip() for page in document]
+    except Exception as exc:
+        raise AppException(400, "PDF 文件损坏或格式无法识别") from exc
 
 
 def extract_pages(content: bytes, suffix: str) -> list[tuple[int, str]]:
-    """使用标准库读取 TXT，使用 Docling 解析结构化文档。"""
+    """使用标准库读取 TXT；PDF 先取文本层，扫描页再调用 GLM-OCR。"""
     if suffix == ".txt":
         try:
             text = content.decode("utf-8-sig")
@@ -42,39 +45,31 @@ def extract_pages(content: bytes, suffix: str) -> list[tuple[int, str]]:
                 raise AppException(400, "TXT 编码无法识别，请使用 UTF-8 或 GB18030") from exc
         return [(1, text)]
 
-    if suffix not in {".pdf", ".docx", ".pptx", ".xlsx", ".html", ".htm"}:
-        raise AppException(400, "仅支持 PDF、DOCX、PPTX、XLSX、HTML、TXT 文档")
+    if suffix != ".pdf":
+        raise AppException(400, "仅支持 PDF、TXT 文档")
 
-    temp_path: Path | None = None
+    page_count = _pdf_page_count(content)
+    if page_count <= 0:
+        raise AppException(400, "PDF 文件不包含可解析页面")
+    if page_count > settings.GLM_OCR_MAX_PDF_PAGES:
+        raise AppException(
+            400,
+            f"PDF 最多支持 {settings.GLM_OCR_MAX_PDF_PAGES} 页，请拆分后重新上传",
+        )
     try:
-        # Docling 接收文件路径，临时文件结束后立即清理，不把用户文档留在服务器临时目录。
-        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as temp_file:
-            temp_file.write(content)
-            temp_path = Path(temp_file.name)
-
-        document = _document_converter().convert(str(temp_path)).document
-        page_numbers = sorted(int(page_number) for page_number in (getattr(document, "pages", {}) or {}))
-        if page_numbers:
-            # PDF 等分页文档按页导出，继续为知识库来源保留真实页码。
-            pages = [
-                (page_number, document.export_to_markdown(page_no=page_number).strip())
-                for page_number in page_numbers
-            ]
-            return [(page_number, text) for page_number, text in pages if text]
-
-        markdown = document.export_to_markdown().strip()
-        if not markdown:
-            return []
-        # DOCX、HTML 等没有稳定分页信息时统一作为第 1 页处理。
-        return [(1, markdown)]
-    except AppException:
-        # 保留依赖或模型缺失的原始状态码，方便前端展示准确处理建议。
-        raise
-    except Exception as exc:
-        raise AppException(400, f"Docling 文档解析失败：{exc}") from exc
-    finally:
-        if temp_path:
-            temp_path.unlink(missing_ok=True)
+        native_pages = _pdf_native_text(content)
+        if all(native_pages):
+            return [(page_number, text) for page_number, text in enumerate(native_pages, start=1) if text]
+        pages = parse_pages(content)
+    except OcrUnavailable as exc:
+        raise AppException(503, str(exc)) from exc
+    # 有文本层的页面保留原文字，空页才使用 OCR 结果。
+    merged = []
+    for page_number, native in enumerate(native_pages, start=1):
+        text = native or (pages[page_number - 1].strip() if page_number - 1 < len(pages) else "")
+        if text:
+            merged.append((page_number, text))
+    return merged
 
 
 def split_text(text: str, chunk_size: int, overlap: int) -> list[str]:

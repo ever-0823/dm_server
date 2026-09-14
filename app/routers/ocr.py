@@ -8,11 +8,11 @@ from app.core.exceptions import AppException
 from app.core.responses import success_response
 from app.dependencies.auth import current_user
 from app import knowledge as knowledge_workflow
-from app.ocr.ppocrv6 import OcrUnavailable, recognize_table, recognize_text
+from app.ocr.glm_ocr import OcrUnavailable, parse_image
 
 router = APIRouter()
 
-# 在上传入口校验文件，避免无效内容进入 PaddleOCR。
+# 在上传入口校验文件，避免无效内容进入 GLM-OCR。
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/bmp", "image/webp"}
 ALLOWED_IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
@@ -32,36 +32,19 @@ async def _read_image(file: UploadFile) -> tuple[str, str, bytes]:
         raise AppException(413, "图片大小不能超过 10 MB")
     return filename, suffix, content
 
-
-@router.post("/ocr/ppocrv6")
-async def ppocrv6(file: UploadFile = File(...), user=Depends(current_user)):
-    """使用本地 PP-OCRv6 模型识别单张图片中的文字。"""
+# 调用 GLM-OCR 解析图片，并将不可用错误转换为服务异常。
+@router.post("/ocr/parse")
+async def parse_ocr_image(file: UploadFile = File(...), user=Depends(current_user)):
+    """使用当前配置的 GLM-OCR 提供方解析单张图片。"""
     _filename, suffix, content = await _read_image(file)
 
     try:
-        lines = await run_in_threadpool(recognize_text, content, suffix)
+        data = await run_in_threadpool(parse_image, content, suffix)
     except OcrUnavailable as exc:
         raise AppException(503, str(exc)) from exc
 
     return success_response(
         message="识别完成",
-        data={"text": "\n".join(line["text"] for line in lines), "lines": lines},
-        operator=user["username"],
-    )
-
-
-@router.post("/knowledge/table/parse")
-async def parse_table(file: UploadFile = File(...), user=Depends(current_user)):
-    """识别表格图片并返回包含坐标和置信度的通用 JSON。"""
-    _filename, suffix, content = await _read_image(file)
-
-    try:
-        data = await run_in_threadpool(recognize_table, content, suffix)
-    except OcrUnavailable as exc:
-        raise AppException(503, str(exc)) from exc
-
-    return success_response(
-        message="表格识别完成",
         data=data,
         operator=user["username"],
     )
@@ -72,17 +55,17 @@ async def upload_ocr_image_to_knowledge(
     file: UploadFile = File(...),
     knowledge_name: str = Form("", max_length=255),
     document_id: int | None = Form(None),
-    corrected_text: str = Form(..., min_length=1, max_length=200000),
-    lines_json: str = Form("[]", max_length=1000000),
+    markdown_content: str = Form(..., min_length=1, max_length=200000),
+    regions_json: str = Form("[]", max_length=1000000),
     user=Depends(current_user),
 ):
-    """保存原图、用户校正文本和 OCR 坐标，并生成知识向量。"""
+    """保存原图、校正后 Markdown 和 OCR 区域，并生成知识向量。"""
     filename, _suffix, content = await _read_image(file)
     try:
-        lines = json.loads(lines_json)
+        regions = json.loads(regions_json)
     except json.JSONDecodeError as exc:
         raise AppException(400, "OCR 坐标数据格式错误") from exc
-    if not isinstance(lines, list):
+    if not isinstance(regions, list):
         raise AppException(400, "OCR 坐标数据必须是列表")
     dataset_name = knowledge_name.strip()
     if document_id is None and not dataset_name:
@@ -94,8 +77,8 @@ async def upload_ocr_image_to_knowledge(
         dataset_name,
         file.content_type or "application/octet-stream",
         content,
-        corrected_text,
-        lines,
+        markdown_content,
+        regions,
         user["username"],
         document_id,
     )

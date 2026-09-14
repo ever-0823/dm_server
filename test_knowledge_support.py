@@ -1,6 +1,6 @@
 import pytest
 
-from app.knowledge.documents import _document_converter, extract_pages, split_text
+from app.knowledge.documents import extract_pages, split_text
 from app.knowledge.qa import parse_qa_response
 from app.knowledge import workflow
 from app.knowledge.workflow import preview_document
@@ -8,78 +8,42 @@ from app.core.config import settings
 from app.core.exceptions import AppException
 
 
-def test_extract_docling_document(monkeypatch, tmp_path) -> None:
-    """文档格式应通过 Docling 转为保留结构的 Markdown。"""
-    import sys
-    from types import ModuleType, SimpleNamespace
-
-    received_options: dict = {}
-
-    class FakeConverter:
-        def __init__(self, **options):
-            received_options.update(options)
-
-        def convert(self, path: str):
-            assert path.endswith(".pdf")
-            return SimpleNamespace(
-                document=SimpleNamespace(
-                    pages={1: object(), 2: object()},
-                    export_to_markdown=lambda page_no=None: {
-                        1: "# 设备规范",
-                        2: "维护前切断电源。",
-                    }[page_no],
-                )
-            )
-
-    class FakePdfFormatOption:
-        def __init__(self, pipeline_options):
-            self.pipeline_options = pipeline_options
-
-    fake_module = ModuleType("docling.document_converter")
-    fake_module.DocumentConverter = FakeConverter
-    fake_module.PdfFormatOption = FakePdfFormatOption
-    monkeypatch.setitem(sys.modules, "docling.document_converter", fake_module)
-    monkeypatch.setattr(settings, "DOCLING_ARTIFACTS_PATH", str(tmp_path))
-    _document_converter.cache_clear()
-
-    pages = extract_pages(b"fake-pdf", ".pdf")
-
-    assert pages == [(1, "# 设备规范"), (2, "维护前切断电源。")]
-    assert received_options["format_options"]
-    _document_converter.cache_clear()
+def test_extract_glm_pdf_keeps_page_numbers(monkeypatch) -> None:
+    """扫描页走 OCR 时应保留原始页码并过滤空页。"""
+    monkeypatch.setattr("app.knowledge.documents._pdf_page_count", lambda _content: 3)
+    monkeypatch.setattr("app.knowledge.documents._pdf_native_text", lambda _content: ["", "", ""])
+    monkeypatch.setattr(
+        "app.knowledge.documents.parse_pages",
+        lambda _content: ["# 设备规范", "", "维护前切断电源。"],
+    )
+    assert extract_pages(b"fake-pdf", ".pdf") == [
+        (1, "# 设备规范"),
+        (3, "维护前切断电源。"),
+    ]
 
 
-def test_extract_docling_document_reports_missing_models(monkeypatch, tmp_path) -> None:
-    """本地模型缺失时应直接返回可处理的服务异常，不应包装为普通文件错误。"""
-    monkeypatch.setattr(settings, "DOCLING_ARTIFACTS_PATH", str(tmp_path / "missing"))
-    _document_converter.cache_clear()
-
+def test_extract_pdf_rejects_excess_pages(monkeypatch) -> None:
+    """超过配置页数的 PDF 必须明确拒绝，不能静默截断。"""
+    monkeypatch.setattr("app.knowledge.documents._pdf_page_count", lambda _content: 11)
+    monkeypatch.setattr(settings, "GLM_OCR_MAX_PDF_PAGES", 10)
     with pytest.raises(AppException) as exc_info:
         extract_pages(b"fake-pdf", ".pdf")
-
-    assert exc_info.value.code == 503
-    assert "Docling 模型未下载" in exc_info.value.message
-    _document_converter.cache_clear()
+    assert exc_info.value.code == 400
+    assert "最多支持 10 页" in exc_info.value.message
 
 
 
 
-def test_nested_business_table_uses_merged_section_cell() -> None:
-    """纵向合并的首列应成为 section，其余单元格应嵌套为 fields。"""
-    from app.ocr.ppocrv6 import _to_nested_business_table
+def test_extract_pdf_text_layer_skips_ocr(monkeypatch) -> None:
+    """可复制 PDF 应直接使用文本层，不再调用 GLM-OCR。"""
+    monkeypatch.setattr("app.knowledge.documents._pdf_page_count", lambda _content: 1)
+    monkeypatch.setattr("app.knowledge.documents._pdf_native_text", lambda _content: ["维护前切断电源。"])
 
-    result = _to_nested_business_table([
-        {"text": "审批表", "row": 0, "column": 0, "row_span": 1, "column_span": 4, "score": 0.95},
-        {"text": "相关信息", "row": 1, "column": 0, "row_span": 2, "column_span": 1, "score": 0.95},
-        {"text": "合同内容", "row": 1, "column": 1, "row_span": 1, "column_span": 1, "score": 0.95},
-        {"text": "采购设备", "row": 1, "column": 2, "row_span": 1, "column_span": 2, "score": 0.9},
-        {"text": "申请单位", "row": 2, "column": 1, "row_span": 1, "column_span": 1, "score": 0.95},
-        {"text": "某某公司", "row": 2, "column": 2, "row_span": 1, "column_span": 2, "score": 0.9},
-    ])
+    def fail(_content):
+        raise AssertionError("有文本层的 PDF 不应调用 OCR")
 
-    assert result["document_title"] == "审批表"
-    assert result["sections"][0]["name"] == "相关信息"
-    assert len(result["sections"][0]["fields"]) == 2
+    monkeypatch.setattr("app.knowledge.documents.parse_pages", fail)
+    assert extract_pages(b"fake-pdf", ".pdf") == [(1, "维护前切断电源。")]
 
 
 def test_split_text_keeps_overlap_and_content() -> None:
@@ -209,6 +173,34 @@ def test_import_image_separates_display_and_search_text(monkeypatch, tmp_path) -
     assert saved["args"][0] is None
     assert saved["args"][1] == "扫码终端故障知识"
     assert saved["args"][2] == "SCAN-TEST-001.jpg"
+
+
+def test_import_document_appends_to_existing_dataset(monkeypatch) -> None:
+    """指定目标数据集时，文档导入应追加而不是新建主体记录。"""
+    saved: dict = {}
+    monkeypatch.setattr(
+        workflow.embedding,
+        "encode_documents",
+        lambda texts: [[0.0] * settings.EMBEDDING_DIMENSIONS for _ in texts],
+    )
+    monkeypatch.setattr(
+        workflow.store,
+        "append_document",
+        lambda *args: saved.update(args=args) or {"id": args[0], "added_chunk_count": len(args[3])},
+    )
+
+    result = workflow.import_document(
+        "追加规范.txt",
+        "text/plain",
+        "追加内容".encode("utf-8"),
+        "tester",
+        False,
+        7,
+    )
+
+    assert result["id"] == 7
+    assert saved["args"][0] == 7
+    assert saved["args"][1] == "追加规范.txt"
 
 
 if __name__ == "__main__":

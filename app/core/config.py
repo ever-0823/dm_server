@@ -22,11 +22,27 @@ class Settings:
     #UPLOAD_FOLDER 就是“文件最终保存到哪里
     UPLOAD_FOLDER = os.path.join(BASE_DIR, "uploads")
 
-    # PaddleOCR 模型保存在后端目录中，部署时可通过环境变量修改路径。
-    OCR_MODEL_CACHE_DIR = os.getenv(
-        "OCR_MODEL_CACHE_DIR",
-        os.path.join(BASE_DIR, ".ocr_models"),
+    # maas 调用官方 API 便于调试，selfhosted 使用本机 Ollama，两者不会自动切换。
+    GLM_OCR_MODE = os.getenv("GLM_OCR_MODE", "selfhosted").strip().lower()
+    if GLM_OCR_MODE not in {"maas", "selfhosted"}:
+        GLM_OCR_MODE = "selfhosted"
+    ZHIPU_API_KEY = os.getenv("ZHIPU_API_KEY", "").strip()
+    GLM_OCR_API_URL = os.getenv(
+        "GLM_OCR_API_URL",
+        "https://open.bigmodel.cn/api/paas/v4/layout_parsing",
     )
+    GLM_OCR_API_MODEL = os.getenv("GLM_OCR_API_MODEL", "glm-ocr")
+    # 本地模式的布局模型保存在后端目录，Ollama 模型由 Ollama 自己管理。
+    GLM_OCR_MODEL_CACHE_DIR = os.getenv(
+        "GLM_OCR_MODEL_CACHE_DIR",
+        os.path.join(BASE_DIR, ".glm_ocr_models"),
+    )
+    GLM_OCR_MODEL = os.getenv("GLM_OCR_MODEL", "glm-ocr:latest")
+    GLM_OCR_LAYOUT_DEVICE = os.getenv("GLM_OCR_LAYOUT_DEVICE", "cpu")
+    GLM_OCR_TIMEOUT = int(os.getenv("GLM_OCR_TIMEOUT", "900"))
+    # 首次加载 Ollama 模型可能较慢，预检连接需要单独留出启动时间。
+    GLM_OCR_CONNECT_TIMEOUT = int(os.getenv("GLM_OCR_CONNECT_TIMEOUT", "300"))
+    GLM_OCR_MAX_PDF_PAGES = int(os.getenv("GLM_OCR_MAX_PDF_PAGES", "10"))
 
     # 知识库使用独立 PostgreSQL，避免影响现有 MySQL 业务数据。
     VECTOR_DB_HOST = os.getenv("VECTOR_DB_HOST", "127.0.0.1")
@@ -43,12 +59,6 @@ class Settings:
     EMBEDDING_MODEL_CACHE_DIR = os.getenv(
         "EMBEDDING_MODEL_CACHE_DIR",
         os.path.join(BASE_DIR, ".embedding_models"),
-    )
-
-    # Docling 使用预下载模型离线解析 PDF，避免运行时访问 Hugging Face 导致超时。
-    DOCLING_ARTIFACTS_PATH = os.getenv(
-        "DOCLING_ARTIFACTS_PATH",
-        os.path.join(os.path.expanduser("~"), ".cache", "docling", "models"),
     )
 
     # 文本块保留少量重叠，避免答案恰好落在两个块的边界上。
