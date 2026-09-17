@@ -55,6 +55,7 @@ async def upload_ocr_image_to_knowledge(
     file: UploadFile = File(...),
     knowledge_name: str = Form("", max_length=255),
     document_id: int | None = Form(None),
+    update_image_id: int | None = Form(None, gt=0),
     markdown_content: str = Form(..., min_length=1, max_length=200000),
     regions_json: str = Form("[]", max_length=1000000),
     user=Depends(current_user),
@@ -81,6 +82,7 @@ async def upload_ocr_image_to_knowledge(
         regions,
         user["username"],
         document_id,
+        **({"update_image_id": update_image_id} if update_image_id is not None else {}),
     )
     message = "图片已存在，无需重复添加" if document.get("duplicate") else "图片文字已保存到知识库"
     return success_response(data=document, message=message, operator=user["username"])

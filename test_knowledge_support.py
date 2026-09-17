@@ -95,6 +95,7 @@ def test_preview_document_uses_existing_chunk_rules() -> None:
 
 def test_search_prioritizes_body_match_over_table_of_contents(monkeypatch) -> None:
     """正文和目录同时命中时，应优先返回正文文本块。"""
+    monkeypatch.setattr(workflow.store, "search_table_records", lambda *_args: [])
     toc = {
         "chunk_id": 1,
         "content": "目录\n二、资源使用 ........................................ 14",
@@ -125,6 +126,7 @@ def test_search_prioritizes_body_match_over_table_of_contents(monkeypatch) -> No
 
 def test_image_query_prioritizes_ocr_source(monkeypatch) -> None:
     """明确提到图片的问题应去除指代词并优先返回 OCR 图片来源。"""
+    monkeypatch.setattr(workflow.store, "search_table_records", lambda *_args: [])
     encoded_queries: list[str] = []
     document = {"chunk_id": 1, "content": "电源指示灯", "context": "电源指示灯", "score": 0.9, "source_type": "document"}
     image = {"chunk_id": 2, "content": "电源指示灯", "context": "电源指示灯", "score": 0.8, "source_type": "image"}

@@ -4,6 +4,7 @@
 from app.knowledge.workflow import (
     ask,
     delete_document,
+    delete_image,
     get_document_chunks,
     get_document_image,
     get_source_image,
@@ -19,6 +20,7 @@ from app.knowledge.workflow import (
 __all__ = [
     "ask",
     "delete_document",
+    "delete_image",
     "get_document_chunks",
     "get_document_image",
     "get_source_image",

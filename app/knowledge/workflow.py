@@ -159,6 +159,7 @@ def import_image(
     regions: list[dict],
     username: str,
     document_id: int | None = None,
+    update_image_id: int | None = None,
 ) -> dict:
     """新建图片知识库，或把一张 OCR 图片追加到现有知识库。"""
     markdown = markdown_content.strip()
@@ -166,6 +167,13 @@ def import_image(
         raise AppException(400, "OCR Markdown 不能为空")
     if document_id is None and not knowledge_name.strip():
         raise AppException(400, "知识库名称不能为空")
+
+    # 追加模式下从主体读取名称，避免后续图片的向量元数据出现空名称。
+    effective_knowledge_name = knowledge_name.strip()
+    if document_id is not None and not effective_knowledge_name:
+        effective_knowledge_name = store.get_document_name(document_id) or ""
+    if not effective_knowledge_name:
+        raise AppException(404, "目标知识库不存在")
 
     # 归档保存用户校正后的 Markdown，向量化只使用可见文字。
     searchable = markdown_to_text(markdown)
@@ -181,7 +189,7 @@ def import_image(
 
     # 检索文本附带图片文件名和来源类型，展示文本仍使用可见正文。
     prefix = (
-        f"知识库名称：{knowledge_name}\n原始图片：{filename}\n"
+        f"知识库名称：{effective_knowledge_name}\n原始图片：{filename}\n"
         f"来源类型：图片 OCR\n图片大小：{len(image_content)} 字节\n内容："
     )
     chunks = [
@@ -196,6 +204,15 @@ def import_image(
     if any(len(vector) != settings.EMBEDDING_DIMENSIONS for vector in vectors):
         raise AppException(500, "模型输出维度与 EMBEDDING_DIMENSIONS 配置不一致")
 
+    # 更新只替换文本和向量，保留原图文件、页码和图片标识。
+    if update_image_id is not None:
+        if document_id is None:
+            raise AppException(400, "更新图片必须指定知识库")
+        return store.update_image_text(
+            document_id, update_image_id, sha256(image_content).hexdigest(),
+            markdown, chunks, vectors,
+        )
+
     image_dir = Path(settings.UPLOAD_FOLDER) / "knowledge_images"
     image_dir.mkdir(parents=True, exist_ok=True)
     suffix = Path(filename).suffix.lower()
@@ -204,7 +221,7 @@ def import_image(
     try:
         result = store.append_image(
             document_id,
-            knowledge_name.strip(),
+            effective_knowledge_name,
             filename,
             content_type,
             len(image_content),
@@ -247,6 +264,10 @@ def search(query: str, top_k: int) -> list[dict]:
         # 用户明确询问图片时优先展示 OCR 图片知识，分数仍决定同类来源内部顺序。
         rows.sort(key=lambda row: row.get("source_type") not in {"image", "image_set"})
     rows = rows[:top_k]
+    # 表格字段召回独立于向量排名，低向量分数不会遮蔽明确的行列证据。
+    table_rows = store.search_table_records(clean_query, top_k)
+    table_documents = {row["document_id"] for row in table_rows}
+    rows = (table_rows + [row for row in rows if row.get("document_id") not in table_documents])[:top_k]
     logger.info(
         "知识库检索完成 query_length=%d top_k=%d result_count=%d elapsed_ms=%.1f",
         len(query),
@@ -290,6 +311,11 @@ def list_document_images(document_id: int) -> list[dict]:
 def get_document_image(document_id: int, image_id: int) -> dict | None:
     """返回知识库中指定的一张 OCR 原图。"""
     return store.get_source_image(document_id, image_id)
+
+
+def delete_image(document_id: int, image_id: int) -> dict | None:
+    """删除知识库中的一张图片，并保持主体统计信息一致。"""
+    return store.delete_image(document_id, image_id)
 
 
 def delete_document(document_id: int) -> bool:

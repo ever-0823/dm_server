@@ -102,10 +102,22 @@ def ensure_schema() -> None:
                     markdown_content TEXT NOT NULL,
                     regions JSONB NOT NULL DEFAULT '[]'::jsonb,
                     content_hash VARCHAR(64),
+                    page_number INTEGER,
                     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                     UNIQUE(document_id, image_index),
                     UNIQUE(document_id, content_hash)
                 )
+                """
+            )
+            # 为图片保存稳定的页码/顺序元数据，旧表通过 image_index 兼容补齐。
+            cursor.execute(
+                "ALTER TABLE knowledge_images ADD COLUMN IF NOT EXISTS page_number INTEGER"
+            )
+            cursor.execute(
+                """
+                UPDATE knowledge_images
+                SET page_number = image_index
+                WHERE page_number IS NULL
                 """
             )
             cursor.execute(
@@ -156,7 +168,7 @@ def ensure_schema() -> None:
                 """
                 INSERT INTO knowledge_images
                     (document_id, image_index, original_name, content_type, source_path,
-                     size_bytes, markdown_content, regions)
+                     size_bytes, markdown_content, regions, page_number)
                 SELECT document.id,
                        1,
                        COALESCE(NULLIF(document.source_metadata->>'original_filename', ''), document.original_name),
@@ -174,7 +186,8 @@ def ensure_schema() -> None:
                            ),
                            ''
                        ),
-                       COALESCE(document.source_metadata->'ocr_lines', '[]'::jsonb)
+                       COALESCE(document.source_metadata->'ocr_lines', '[]'::jsonb),
+                       1
                 FROM knowledge_documents AS document
                 WHERE document.source_type IN ('image', 'image_set')
                   AND document.source_path IS NOT NULL
@@ -373,6 +386,7 @@ def append_image(
     chunks: list[dict],
     vectors: list[list[float]],
     username: str,
+    page_number: int | None = None,
 ) -> dict:
     """新建图片知识库或向现有图片知识库追加一张图片。"""
     ensure_schema()
@@ -448,12 +462,14 @@ def append_image(
             )
             chunk_index = cursor.fetchone()["next_chunk_index"]
 
+        # 未传真实页码时沿用保存顺序，确保旧调用方仍然可以正常追加图片。
+        stored_page_number = max(1, int(page_number or image_index))
         cursor.execute(
             """
             INSERT INTO knowledge_images
                 (document_id, image_index, original_name, content_type, source_path,
-                 size_bytes, markdown_content, regions, content_hash)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s)
+                 size_bytes, markdown_content, regions, content_hash, page_number)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s)
             RETURNING id
             """,
             (
@@ -466,6 +482,7 @@ def append_image(
                 markdown_content,
                 json.dumps(regions, ensure_ascii=False),
                 content_hash,
+                stored_page_number,
             ),
         )
         image_id = cursor.fetchone()["id"]
@@ -480,7 +497,7 @@ def append_image(
                     document_id,
                     image_id,
                     chunk_index + offset,
-                    image_index,
+                    stored_page_number,
                     chunk["content"],
                     chunk.get("display_content") or chunk["content"],
                     Vector(vectors[offset]),
@@ -505,9 +522,68 @@ def append_image(
         **result,
         "image_id": image_id,
         "image_index": image_index,
+        "page_number": stored_page_number,
         "duplicate": False,
         "added_chunk_count": len(chunks),
     }
+
+
+def update_image_text(document_id: int, image_id: int, content_hash: str,
+                      markdown: str, chunks: list[dict], vectors: list[list[float]]) -> dict:
+    """原子更新 OCR 校正文稿和索引；失败时由事务保留原数据。"""
+    ensure_schema()
+    from pgvector import Vector
+
+    with _connect() as connection, connection.cursor() as cursor:
+        # 与续表合并使用相同的文档锁，防止并发更新破坏合并元数据。
+        cursor.execute(
+            "SELECT source_metadata FROM knowledge_documents WHERE id = %s FOR UPDATE",
+            (document_id,),
+        )
+        document = cursor.fetchone()
+        if document is None:
+            raise AppException(404, "知识库不存在")
+        groups = (document["source_metadata"] or {}).get("table_merges", [])
+        if any(s["image_id"] == image_id for g in groups for s in g["selections"]):
+            raise AppException(409, "该图片已参与续表合并，请先撤销对应合并，再修改并重新合并")
+        cursor.execute(
+            """SELECT content_hash, page_number, image_index FROM knowledge_images
+               WHERE id = %s AND document_id = %s FOR UPDATE""",
+            (image_id, document_id),
+        )
+        image = cursor.fetchone()
+        if image is None:
+            raise AppException(404, "原图片不存在")
+        if image["content_hash"] != content_hash:
+            raise AppException(409, "本地图片已变化，请重新导入，不能覆盖原图内容")
+        cursor.execute(
+            "DELETE FROM knowledge_chunks WHERE document_id = %s AND source_image_id = %s",
+            (document_id, image_id),
+        )
+        cursor.execute(
+            "SELECT COALESCE(MAX(chunk_index), -1) + 1 AS start FROM knowledge_chunks WHERE document_id = %s",
+            (document_id,),
+        )
+        start = cursor.fetchone()["start"]
+        cursor.executemany(
+            """INSERT INTO knowledge_chunks
+               (document_id, source_image_id, chunk_index, page_number, content, display_content, embedding)
+               VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+            [(document_id, image_id, start + n, image["page_number"] or image["image_index"],
+              chunk["content"], chunk.get("display_content") or chunk["content"], Vector(vectors[n]))
+             for n, chunk in enumerate(chunks)],
+        )
+        cursor.execute(
+            "UPDATE knowledge_images SET markdown_content = %s WHERE id = %s",
+            (markdown, image_id),
+        )
+        cursor.execute(
+            """UPDATE knowledge_documents SET chunk_count =
+               (SELECT COUNT(*) FROM knowledge_chunks WHERE document_id = %s)
+               WHERE id = %s RETURNING id, chunk_count""",
+            (document_id, document_id),
+        )
+        return {**cursor.fetchone(), "image_id": image_id, "updated": True, "duplicate": False}
 
 
 def search_chunks(query_vector: list[float], top_k: int) -> list[dict]:
@@ -517,6 +593,7 @@ def search_chunks(query_vector: list[float], top_k: int) -> list[dict]:
 
     database_started_at = time.perf_counter()
     with _connect() as connection, connection.cursor() as cursor:
+        # 上下文按同一知识库主体的 chunk_index 拼接，允许相邻图片之间共享检索上下文。
         cursor.execute(
             """
             WITH ranked AS (
@@ -543,19 +620,18 @@ def search_chunks(query_vector: list[float], top_k: int) -> list[dict]:
                    r.source_image_id,
                    r.source_image_name,
                    r.page_number,
-                   COALESCE(r.display_content, r.content) AS content,
+                   r.content AS content,
                    COALESCE(
                        (
                            SELECT STRING_AGG(
-                               COALESCE(context_chunk.display_content, context_chunk.content),
+                               context_chunk.content,
                                E'\n\n' ORDER BY context_chunk.chunk_index
                            )
                            FROM knowledge_chunks context_chunk
                            WHERE context_chunk.document_id = r.document_id
-                             AND (r.source_image_id IS NULL OR context_chunk.source_image_id = r.source_image_id)
-                             AND context_chunk.chunk_index BETWEEN r.chunk_index - 1 AND r.chunk_index + 1
+                              AND context_chunk.chunk_index BETWEEN r.chunk_index - 1 AND r.chunk_index + 1
                        ),
-                       COALESCE(r.display_content, r.content)
+                       r.content
                    ) AS context,
                    r.score
             FROM ranked r
@@ -648,7 +724,7 @@ def list_document_images(document_id: int) -> list[dict]:
         cursor.execute(
             """
             SELECT id, document_id, image_index, original_name, content_type,
-                   size_bytes, created_at
+                   size_bytes, page_number, created_at
             FROM knowledge_images
             WHERE document_id = %s
             ORDER BY image_index
@@ -701,6 +777,91 @@ def get_source_image(document_id: int, image_id: int | None = None) -> dict | No
     }
 
 
+def get_document_name(document_id: int) -> str | None:
+    """返回图片知识库主体名称，用于追加图片时补全检索元数据。"""
+    ensure_schema()
+    with _connect() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT original_name FROM knowledge_documents WHERE id = %s",
+            (document_id,),
+        )
+        document = cursor.fetchone()
+    return str(document["original_name"]) if document else None
+
+
+def delete_image(document_id: int, image_id: int) -> dict | None:
+    """删除知识库中的单张图片，并同步删除其文本块、向量和物理文件。"""
+    ensure_schema()
+    source_path: str | None = None
+    with _connect() as connection, connection.cursor() as cursor:
+        # 锁定主体，避免删除和追加同时修改汇总统计。
+        cursor.execute(
+            "SELECT id, source_metadata FROM knowledge_documents WHERE id = %s FOR UPDATE",
+            (document_id,),
+        )
+        parent = cursor.fetchone()
+        if parent is None:
+            return None
+        # 合并表的表头可能来自另一张图，删除前要求撤销以避免失去来源依据。
+        if any(s["image_id"] == image_id
+               for g in (parent.get("source_metadata") or {}).get("table_merges", [])
+               for s in g["selections"]):
+            raise AppException(409, "该图片参与了续表合并，请先撤销合并再删除")
+
+        cursor.execute(
+            """
+            SELECT id, original_name, source_path, size_bytes
+            FROM knowledge_images
+            WHERE document_id = %s AND id = %s
+            FOR UPDATE
+            """,
+            (document_id, image_id),
+        )
+        image = cursor.fetchone()
+        if image is None:
+            return None
+        source_path = image["source_path"]
+
+        cursor.execute(
+            "SELECT COUNT(*) AS chunk_count FROM knowledge_chunks WHERE source_image_id = %s",
+            (image_id,),
+        )
+        deleted_chunk_count = int(cursor.fetchone()["chunk_count"])
+        cursor.execute("DELETE FROM knowledge_images WHERE id = %s", (image_id,))
+        cursor.execute(
+            """
+            UPDATE knowledge_documents AS document
+            SET size_bytes = GREATEST(document.size_bytes - %s, 0),
+                chunk_count = GREATEST(document.chunk_count - %s, 0),
+                source_type = CASE
+                    WHEN (SELECT COUNT(*) FROM knowledge_images WHERE document_id = document.id) > 1
+                    THEN 'image_set'
+                    ELSE 'image'
+                END
+            WHERE document.id = %s
+            RETURNING id, original_name, source_type, size_bytes, chunk_count
+            """,
+            (image["size_bytes"], deleted_chunk_count, document_id),
+        )
+        document = cursor.fetchone()
+
+    if source_path:
+        uploads_root = Path(settings.UPLOAD_FOLDER).resolve()
+        candidate = Path(source_path).resolve()
+        # 只清理上传目录内的文件，避免数据库异常路径影响其他文件。
+        if candidate.is_relative_to(uploads_root):
+            try:
+                candidate.unlink(missing_ok=True)
+            except OSError as exc:
+                logger.warning("图片记录已删除，但原图清理失败 path=%s error=%s", candidate, exc)
+    return {
+        "document": document,
+        "image_id": image_id,
+        "deleted_filename": image["original_name"],
+        "deleted_chunk_count": deleted_chunk_count,
+    }
+
+
 def delete_document(document_id: int) -> bool:
     """删除文档；外键级联同步删除全部向量块。"""
     ensure_schema()
@@ -725,3 +886,99 @@ def delete_document(document_id: int) -> bool:
             except OSError as exc:
                 logger.warning("知识库已删除，但原图清理失败 path=%s error=%s", candidate, exc)
     return deleted
+
+
+def table_merge_snapshot(document_id: int) -> dict:
+    """读取同一知识库的图片归档及合并元数据，不触碰原图文件。"""
+    ensure_schema()
+    with _connect() as connection, connection.cursor() as cursor:
+        cursor.execute("SELECT original_name, source_metadata FROM knowledge_documents WHERE id = %s", (document_id,))
+        document = cursor.fetchone()
+        if document is None:
+            raise AppException(404, "知识库不存在")
+        cursor.execute(
+            """SELECT id, original_name, markdown_content, COALESCE(page_number, image_index) AS page_number
+               FROM knowledge_images WHERE document_id = %s ORDER BY image_index""",
+            (document_id,),
+        )
+        return {"id": document_id, "name": document["original_name"],
+                "metadata": document["source_metadata"] or {}, "images": cursor.fetchall()}
+
+
+def search_table_records(query: str, top_k: int) -> list[dict]:
+    """从已确认的逻辑表独立召回，历史合并表无需重新生成向量即可使用。"""
+    from app.knowledge.table_records import matching_records
+
+    ensure_schema()
+    matches = []
+    # ponytail: 首期流式扫描合并元数据；大规模知识库再建立字段级检索索引。
+    with _connect() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            """SELECT id, original_name, source_type, source_metadata
+               FROM knowledge_documents
+               WHERE source_metadata ? 'table_merges' ORDER BY id"""
+        )
+        for document in cursor:
+            for group in document["source_metadata"]["table_merges"]:
+                found = matching_records(query, group)
+                if not found:
+                    continue
+                references = list({
+                    (item["source"].get("image_id"), item["source"].get("page_number", 1))
+                    for item in found
+                })
+                references.sort(key=lambda ref: (ref[1], ref[0] or 0))
+                # 每条证据都附真实页码，不把跨页内容错误归给第一张图片。
+                context = f"表名：{group['title']}\n" + "\n\n".join(
+                    f"[图片ID：{item['source'].get('image_id')}，第 {item['source'].get('page_number', 1)} 页]\n"
+                    + item["text"] for item in found
+                )
+                matches.append({
+                    "document_id": document["id"], "original_name": document["original_name"],
+                    "source_type": document["source_type"], "source_image_id": references[0][0],
+                    "page_number": references[0][1], "source_image_name": None,
+                    "content": context, "context": context, "score": 0.0,
+                    "match_type": "table_fields", "table_id": group["id"],
+                    "references": [{"image_id": image, "page_number": page} for image, page in references],
+                })
+    # 关键词匹配不伪造余弦分数；同等匹配维持数据库中的稳定顺序。
+    return matches[:top_k]
+
+
+def commit_table_merge(snapshot: dict, image_ids: list[int], chunks: list[dict],
+                       vectors: list[list[float]], metadata: dict) -> dict:
+    """锁定文档并校验版本，原子替换选中图片的索引与逻辑表。"""
+    from pgvector import Vector
+    from app.knowledge.table_merge import revision
+
+    ensure_schema()
+    with _connect() as connection, connection.cursor() as cursor:
+        cursor.execute("SELECT source_metadata FROM knowledge_documents WHERE id = %s FOR UPDATE", (snapshot["id"],))
+        document = cursor.fetchone()
+        if document is None:
+            raise AppException(404, "知识库不存在")
+        cursor.execute(
+            """SELECT id, markdown_content FROM knowledge_images
+               WHERE document_id = %s ORDER BY image_index FOR UPDATE""", (snapshot["id"],),
+        )
+        if revision(cursor.fetchall(), document["source_metadata"] or {}) != revision(snapshot["images"], snapshot["metadata"]):
+            raise AppException(409, "图片已变化，请重新预览")
+        cursor.execute("DELETE FROM knowledge_chunks WHERE document_id = %s AND source_image_id = ANY(%s)",
+                       (snapshot["id"], image_ids))
+        cursor.execute("SELECT COALESCE(MAX(chunk_index), -1) + 1 AS start FROM knowledge_chunks WHERE document_id = %s",
+                       (snapshot["id"],))
+        start = cursor.fetchone()["start"]
+        cursor.executemany(
+            """INSERT INTO knowledge_chunks
+               (document_id, source_image_id, chunk_index, page_number, content, display_content, embedding)
+               VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+            [(snapshot["id"], c["source_image_id"], start + n, c["page_number"],
+              c["content"], c.get("display_content", c["content"]), Vector(vectors[n])) for n, c in enumerate(chunks)],
+        )
+        cursor.execute(
+            """UPDATE knowledge_documents SET source_metadata = %s::jsonb,
+               chunk_count = (SELECT COUNT(*) FROM knowledge_chunks WHERE document_id = %s)
+               WHERE id = %s RETURNING id, chunk_count""",
+            (json.dumps(metadata, ensure_ascii=False), snapshot["id"], snapshot["id"]),
+        )
+        return cursor.fetchone()

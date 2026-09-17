@@ -1,4 +1,5 @@
 import json
+from typing import Literal
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
@@ -23,6 +24,65 @@ class KnowledgeSearchRequest(BaseModel):
 
     query: str = Field(min_length=1, max_length=1000)
     top_k: int = Field(default=5, ge=1, le=20)
+
+
+class TableSelection(BaseModel):
+    """明确选择来源图片、表格编号以及是否跳过重复表头。"""
+
+    image_id: int = Field(gt=0)
+    table_index: int = Field(ge=0)
+    skip_header: bool = False
+
+
+class TableMergeRequest(BaseModel):
+    """预览和确认共用请求；确认必须携带预览数据版本。"""
+
+    title: str = Field(default="合并表格", max_length=255)
+    headers: list[str] = Field(default_factory=list, max_length=100)
+    selections: list[TableSelection] = Field(min_length=2, max_length=20)
+    revision: str = Field(default="", max_length=64)
+    # 用户确认结构，后端不通过型号名称猜测表格类型。
+    table_type: Literal["records", "comparison"] = "records"
+
+
+@router.get("/knowledge/documents/{document_id}/table-merge")
+async def table_merge_options(document_id: int, user=Depends(current_user)):
+    """列出原图中的表格和已合并的逻辑表。"""
+    from app.knowledge import table_merge
+    data = await run_in_threadpool(table_merge.options, document_id)
+    return success_response(data=data, operator=user["username"])
+
+
+@router.post("/knowledge/documents/{document_id}/table-merge/preview")
+async def table_merge_preview(document_id: int, payload: TableMergeRequest, user=Depends(current_user)):
+    """只生成合并预览，不生成向量。"""
+    from app.knowledge import table_merge
+    data = await run_in_threadpool(table_merge.preview, document_id, payload.model_dump())
+    return success_response(data=data, operator=user["username"])
+
+
+@router.post("/knowledge/documents/{document_id}/table-merge")
+async def table_merge_apply(document_id: int, payload: TableMergeRequest, user=Depends(current_user)):
+    """用户确认后保存逻辑表并原子重建索引。"""
+    from app.knowledge import table_merge
+    data = await run_in_threadpool(table_merge.apply, document_id, payload.model_dump())
+    return success_response(data=data, operator=user["username"])
+
+
+@router.delete("/knowledge/documents/{document_id}/table-merge/{group_id}")
+async def table_merge_undo(document_id: int, group_id: str, user=Depends(current_user)):
+    """恢复合并前的图片索引，保留所有原图。"""
+    from app.knowledge import table_merge
+    data = await run_in_threadpool(table_merge.undo, document_id, group_id)
+    return success_response(data=data, operator=user["username"])
+
+
+@router.post("/knowledge/documents/{document_id}/table-merge/reindex")
+async def table_merge_reindex(document_id: int, user=Depends(current_user)):
+    """用户主动重建已有合并表的检索文本和向量，不改归档原文。"""
+    from app.knowledge import table_merge
+    data = await run_in_threadpool(table_merge.reindex, document_id)
+    return success_response(data=data, operator=user["username"])
 
 
 async def _read_document(file: UploadFile) -> tuple[str, bytes]:
@@ -158,6 +218,15 @@ async def get_document_image(document_id: int, image_id: int, user=Depends(curre
         media_type=source["content_type"],
         filename=source["filename"],
     )
+
+
+@router.delete("/knowledge/documents/{document_id}/images/{image_id}")
+async def remove_document_image(document_id: int, image_id: int, user=Depends(current_user)):
+    """删除知识库中的单张图片及其 OCR 文本块。"""
+    result = await run_in_threadpool(knowledge_workflow.delete_image, document_id, image_id)
+    if result is None:
+        raise AppException(404, "知识库图片不存在")
+    return success_response(data=result, message="知识库图片删除成功", operator=user["username"])
 
 
 @router.delete("/knowledge/documents/{document_id}")

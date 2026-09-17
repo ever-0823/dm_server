@@ -246,3 +246,30 @@ def test_knowledge_document_images_api(monkeypatch) -> None:
 
     assert response.status_code == 200
     assert response.json()["data"]["items"][0]["original_name"] == "device.png"
+
+
+def test_knowledge_document_image_delete_api(monkeypatch) -> None:
+    """单图删除路由应返回后端更新后的分组统计。"""
+    app = create_app()
+    app.dependency_overrides[current_user] = lambda: {"username": "test_user"}
+    monkeypatch.setattr(
+        "app.routers.knowledge.knowledge_workflow.delete_image",
+        lambda document_id, image_id: {
+            "document": {
+                "id": document_id,
+                "source_type": "image",
+                "chunk_count": 0,
+            },
+            "image_id": image_id,
+            "deleted_filename": "device.png",
+            "deleted_chunk_count": 2,
+        },
+    )
+    try:
+        response = TestClient(app).delete("/api/knowledge/documents/7/images/11")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert response.json()["data"]["image_id"] == 11
+    assert response.json()["data"]["deleted_chunk_count"] == 2
